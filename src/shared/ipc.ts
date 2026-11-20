@@ -4,7 +4,7 @@
  * allowed to call it. Main rejects calls from any other sender.
  */
 import type { Point, Rect, Size } from './geometry';
-import type { DeepPartial, Settings, ToolChoices, ToolId } from './settings';
+import type { DeepPartial, HotkeyAction, Settings, ToolChoices, ToolId } from './settings';
 import type { UpdateOffer, UpdateStatus } from './update';
 
 export const APP_ORIGIN = 'app://local';
@@ -213,6 +213,18 @@ export interface OcrResult {
   qr: string[];
 }
 
+export interface HotkeyFailure {
+  action: HotkeyAction;
+  accelerator: string;
+  /** Set when another action in settings already uses this accelerator. */
+  conflictWith?: HotkeyAction;
+}
+
+export interface HotkeyReport {
+  registered: HotkeyAction[];
+  failed: HotkeyFailure[];
+}
+
 export interface Metrics {
   processes: { type: string; pid: number; cpu: number; memoryKB: number }[];
   mainHeapMB: number;
@@ -289,6 +301,7 @@ export interface InvokeContract {
   'uploads:test': Channel<void, DeliverResult>;
   'settings:choose-dir': Channel<'output' | 'recording', string | null>;
   'settings:set-tool-enabled': Channel<{ tool: ToolId; enabled: boolean }, void>;
+  'hotkeys:status': Channel<void, HotkeyReport>;
 }
 
 export type InvokeChannel = keyof InvokeContract;
@@ -371,11 +384,13 @@ export const INVOKE_ACCESS: { readonly [K in InvokeChannel]: readonly WindowKind
   'uploads:test': ['settings'],
   'settings:choose-dir': ['settings'],
   'settings:set-tool-enabled': ['settings'],
+  'hotkeys:status': ['settings'],
 };
 
 /** Events pushed from main to windows. */
 export interface EventContract {
   'settings:changed': Settings;
+  'hotkeys:changed': HotkeyReport;
   'overlay:clear-selection': undefined;
   'overlay:reset': OverlayInit;
   'floating:items': FloatingItem[];
@@ -389,6 +404,7 @@ export type EventChannel = keyof EventContract;
 
 export const EVENT_CHANNELS: readonly EventChannel[] = [
   'settings:changed',
+  'hotkeys:changed',
   'overlay:clear-selection',
   'overlay:reset',
   'floating:items',

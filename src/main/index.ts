@@ -3,12 +3,13 @@ import type { Settings } from '../shared/settings';
 import { runAction, setCaptureDelay } from './actions';
 import { onAppState } from './app-state';
 import { type AppAction, parseCli } from './cli';
-import { registerHotkeys, unregisterHotkeys } from './hotkeys';
+import { notifyHotkeyFailures, registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { registerIpc } from './ipc-handlers';
 import { isTest } from './paths';
 import { registerAppScheme } from './protocol';
 import { getSettings, loadSettings, onSettingsChanged } from './settings-store';
 import { createTray, trayTemplate, updateTray } from './tray';
+import { broadcast } from './windows';
 
 if (!app.requestSingleInstanceLock()) {
   app.exit(0);
@@ -32,6 +33,12 @@ function refreshTray(settings: Settings): void {
   if (isTest) Menu.setApplicationMenu(menu);
 }
 
+function applyHotkeys(hotkeys: Settings['hotkeys']): void {
+  const report = registerHotkeys(hotkeys, (action) => dispatch(action));
+  broadcast('hotkeys:changed', report);
+  if (report.failed.length > 0 && !isTest) notifyHotkeyFailures(report.failed);
+}
+
 app.on('second-instance', (_event, argv, workingDirectory) => {
   for (const command of parseCli(argv, workingDirectory)) dispatch(command.action, command.file);
 });
@@ -47,7 +54,7 @@ app.whenReady().then(async () => {
   const settings = await loadSettings();
   createTray();
   refreshTray(settings);
-  registerHotkeys(settings.hotkeys, (action) => dispatch(action));
+  applyHotkeys(settings.hotkeys);
   onSettingsChanged((next, prev) => {
     refreshTray(next);
     if (next.capture.instantCapture !== prev.capture.instantCapture) {
@@ -61,7 +68,7 @@ app.whenReady().then(async () => {
         .catch((error) => console.error('[login-item] could not update autostart', error));
     }
     if (JSON.stringify(next.hotkeys) !== JSON.stringify(prev.hotkeys)) {
-      registerHotkeys(next.hotkeys, (action) => dispatch(action));
+      applyHotkeys(next.hotkeys);
     }
   });
   onAppState(() => refreshTray(getSettings()));

@@ -22,6 +22,19 @@ export const HOTKEY_ACTIONS = [
 ] as const;
 export type HotkeyAction = (typeof HOTKEY_ACTIONS)[number];
 
+export const HOTKEY_LABELS: Record<HotkeyAction, string> = {
+  captureArea: 'Capture area',
+  captureScreen: 'Capture screen',
+  captureOcr: 'Capture text (OCR)',
+  quickCapture: 'Quick capture',
+  captureLastArea: 'Capture last area',
+  scrollCapture: 'Scroll capture',
+  recordArea: 'Record area (again to stop)',
+  recordGif: 'Record GIF',
+  history: 'History',
+  pinClipboard: 'Pin from clipboard',
+};
+
 /** Font families for the text tool, each mapped to fonts Windows and Linux ship. */
 export const TEXT_FONTS = ['sans', 'serif', 'mono', 'hand'] as const;
 export type TextFont = (typeof TEXT_FONTS)[number];

@@ -2,6 +2,7 @@ import { type BrowserWindow, shell } from 'electron';
 import type { ToolChoices } from '../shared/settings';
 import { copyText } from './clipboard';
 import { releaseFrame } from './frames';
+import { getHotkeyReport } from './hotkeys';
 import { handle } from './ipc';
 import { getSettings, onSettingsChanged, patchSettings } from './settings-store';
 import { broadcast } from './windows';
@@ -10,6 +11,7 @@ import { broadcast } from './windows';
 export function registerIpc(): void {
   handle('settings:get', () => getSettings());
   handle('settings:patch', (patch) => patchSettings(patch));
+  handle('hotkeys:status', () => getHotkeyReport());
   registerToolChoices();
   handle('window:close', (_req, { win }) => win.close());
   handle('window:set-size', ({ width, height }, { win }) => {

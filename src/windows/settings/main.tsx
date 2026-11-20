@@ -1,13 +1,15 @@
 import '../common/ui.css';
 import './settings.css';
-import { cloneElement, type ComponentChildren, isValidElement, render } from 'preact';
+import { type ComponentChildren, cloneElement, isValidElement, render } from 'preact';
 import { useEffect, useId, useState } from 'preact/hooks';
+import logo from '../../../resources/icon-256.png';
 import { expandTemplate } from '../../shared/filename';
-import type { InvokeRes } from '../../shared/ipc';
+import type { HotkeyReport, InvokeRes } from '../../shared/ipc';
 import {
   ACCELERATOR,
   type DeepPartial,
   HOTKEY_ACTIONS,
+  HOTKEY_LABELS,
   type HotkeyAction,
   type Settings,
   TOOL_IDS,
@@ -16,7 +18,6 @@ import {
 import { Icon, type IconName } from '../common/icons';
 import { applyTheme } from '../common/theme';
 import { TOOL_LABELS } from '../common/tools';
-import logo from '../../../resources/icon-256.png';
 
 const api = window.anyshot;
 type Tab =
@@ -38,19 +39,6 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'uploads', label: 'Uploads' },
   { id: 'about', label: 'About' },
 ];
-
-const HOTKEY_LABELS: Record<HotkeyAction, string> = {
-  captureArea: 'Capture area',
-  captureScreen: 'Capture screen',
-  captureOcr: 'Capture text (OCR)',
-  quickCapture: 'Quick capture',
-  captureLastArea: 'Capture last area',
-  scrollCapture: 'Scroll capture',
-  recordArea: 'Record area (again to stop)',
-  recordGif: 'Record GIF',
-  history: 'History',
-  pinClipboard: 'Pin from clipboard',
-};
 
 let patch: (p: DeepPartial<Settings>) => void = () => {};
 
@@ -286,13 +274,13 @@ export function acceleratorFor(e: KeyboardEvent): string | null {
   return ACCELERATOR.test(accel) ? accel : null;
 }
 
-function Shortcut(props: { action: HotkeyAction; value: string }) {
+function Shortcut(props: { action: HotkeyAction; value: string; invalid?: boolean }) {
   const [recording, setRecording] = useState(false);
   return (
     <span class="shortcut">
       <button
         type="button"
-        class={`keys${recording ? ' recording' : ''}`}
+        class={`keys${recording ? ' recording' : ''}${props.invalid ? ' invalid' : ''}`}
         data-testid={`hotkey-${props.action}`}
         aria-label={`${HOTKEY_LABELS[props.action]} shortcut (${recording ? 'press keys' : props.value || 'none'})`}
         onClick={() => setRecording(true)}
@@ -540,7 +528,15 @@ function Uploads({ s }: { s: Settings }) {
   );
 }
 
-function Page({ tab, s }: { tab: Tab; s: Settings }) {
+function Page({
+  tab,
+  s,
+  hotkeyReport,
+}: {
+  tab: Tab;
+  s: Settings;
+  hotkeyReport: HotkeyReport | null;
+}) {
   const c = s.capture;
   const o = s.output;
   switch (tab) {
@@ -769,7 +765,8 @@ function Page({ tab, s }: { tab: Tab; s: Settings }) {
           </Row>
         </>
       );
-    case 'shortcuts':
+    case 'shortcuts': {
+      const failedByAction = new Map((hotkeyReport?.failed ?? []).map((f) => [f.action, f]));
       return (
         <>
           <p class="note">
@@ -777,13 +774,26 @@ function Page({ tab, s }: { tab: Tab; s: Settings }) {
             already use it. On Wayland, bind commands such as <code>anyshot --capture</code> in your
             desktop's keyboard settings instead.
           </p>
-          {HOTKEY_ACTIONS.map((action) => (
-            <Row key={action} label={HOTKEY_LABELS[action]} group>
-              <Shortcut action={action} value={s.hotkeys[action]} />
-            </Row>
-          ))}
+          {HOTKEY_ACTIONS.map((action) => {
+            const failure = failedByAction.get(action);
+            return (
+              <Row key={action} label={HOTKEY_LABELS[action]} group>
+                <div class="shortcut-wrap">
+                  <Shortcut action={action} value={s.hotkeys[action]} invalid={Boolean(failure)} />
+                  {failure && (
+                    <small class="shortcut-warn" role="alert" data-testid={`hotkey-warn-${action}`}>
+                      {failure.conflictWith
+                        ? `Conflicts with ${HOTKEY_LABELS[failure.conflictWith]}`
+                        : 'Already in use by another app'}
+                    </small>
+                  )}
+                </div>
+              </Row>
+            );
+          })}
         </>
       );
+    }
     case 'tools':
       return (
         <>
@@ -902,6 +912,7 @@ function Page({ tab, s }: { tab: Tab; s: Settings }) {
 
 function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [hotkeyReport, setHotkeyReport] = useState<HotkeyReport | null>(null);
   const [tab, setTab] = useState<Tab>('general');
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -909,10 +920,16 @@ function App() {
       setSettings(s);
       applyTheme(s);
     });
-    return api.on('settings:changed', (s) => {
+    void api.invoke('hotkeys:status').then(setHotkeyReport);
+    const offSettings = api.on('settings:changed', (s) => {
       setSettings(s);
       applyTheme(s);
     });
+    const offHotkeys = api.on('hotkeys:changed', setHotkeyReport);
+    return () => {
+      offSettings();
+      offHotkeys();
+    };
   }, []);
   submitSettings = (request) => {
     setError(null);
@@ -944,7 +961,7 @@ function App() {
             {error}
           </p>
         )}
-        <Page tab={tab} s={settings} />
+        <Page tab={tab} s={settings} hotkeyReport={hotkeyReport} />
       </section>
     </div>
   );

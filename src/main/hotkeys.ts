@@ -1,12 +1,20 @@
-import { globalShortcut } from 'electron';
-import { HOTKEY_ACTIONS, type HotkeyAction, type Settings } from '../shared/settings';
+import { globalShortcut, Notification } from 'electron';
+import type { HotkeyFailure, HotkeyReport } from '../shared/ipc';
+import {
+  HOTKEY_ACTIONS,
+  HOTKEY_LABELS,
+  type HotkeyAction,
+  type Settings,
+} from '../shared/settings';
 
-export interface HotkeyReport {
-  registered: HotkeyAction[];
-  failed: { action: HotkeyAction; accelerator: string }[];
-}
+export type { HotkeyFailure, HotkeyReport } from '../shared/ipc';
 
 let registered = new Map<string, HotkeyAction>();
+let latestReport: HotkeyReport = { registered: [], failed: [] };
+
+export function getHotkeyReport(): HotkeyReport {
+  return latestReport;
+}
 
 /** Re-registers all global shortcuts from settings. Event-driven: no polling. */
 export function registerHotkeys(
@@ -18,7 +26,12 @@ export function registerHotkeys(
   const report: HotkeyReport = { registered: [], failed: [] };
   for (const action of HOTKEY_ACTIONS) {
     const accelerator = hotkeys[action];
-    if (!accelerator || registered.has(accelerator)) continue;
+    if (!accelerator) continue;
+    const conflictWith = registered.get(accelerator);
+    if (conflictWith) {
+      report.failed.push({ action, accelerator, conflictWith });
+      continue;
+    }
     let ok = false;
     try {
       ok = globalShortcut.register(accelerator, () => run(action));
@@ -32,6 +45,7 @@ export function registerHotkeys(
       report.failed.push({ action, accelerator });
     }
   }
+  latestReport = report;
   if (report.failed.length > 0) {
     console.warn('[hotkeys] could not register', report.failed);
   }
@@ -41,4 +55,31 @@ export function registerHotkeys(
 export function unregisterHotkeys(): void {
   globalShortcut.unregisterAll();
   registered.clear();
+  latestReport = { registered: [], failed: [] };
+}
+
+export function formatHotkeyFailureNotification(
+  failed: HotkeyFailure[],
+): { title: string; body: string } | null {
+  const first = failed[0];
+  if (!first) return null;
+  if (failed.length === 1) {
+    const label = HOTKEY_LABELS[first.action];
+    return {
+      title: 'Shortcut unavailable',
+      body: first.conflictWith
+        ? `${label} (${first.accelerator}) conflicts with ${HOTKEY_LABELS[first.conflictWith]}.`
+        : `${label} (${first.accelerator}) is already used by another app.`,
+    };
+  }
+  const list = failed.map((f) => `${HOTKEY_LABELS[f.action]} (${f.accelerator})`).join(', ');
+  return {
+    title: 'Shortcuts unavailable',
+    body: `${failed.length} shortcuts could not be registered: ${list}.`,
+  };
+}
+
+export function notifyHotkeyFailures(failed: HotkeyFailure[]): void {
+  const message = formatHotkeyFailureNotification(failed);
+  if (message) new Notification(message).show();
 }
