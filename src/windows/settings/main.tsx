@@ -274,7 +274,12 @@ export function acceleratorFor(e: KeyboardEvent): string | null {
   return ACCELERATOR.test(accel) ? accel : null;
 }
 
-function Shortcut(props: { action: HotkeyAction; value: string; invalid?: boolean }) {
+function Shortcut(props: {
+  action: HotkeyAction;
+  value: string;
+  invalid?: boolean;
+  describedBy?: string;
+}) {
   const [recording, setRecording] = useState(false);
   return (
     <span class="shortcut">
@@ -282,6 +287,7 @@ function Shortcut(props: { action: HotkeyAction; value: string; invalid?: boolea
         type="button"
         class={`keys${recording ? ' recording' : ''}${props.invalid ? ' invalid' : ''}`}
         data-testid={`hotkey-${props.action}`}
+        aria-describedby={props.describedBy}
         aria-label={`${HOTKEY_LABELS[props.action]} shortcut (${recording ? 'press keys' : props.value || 'none'})`}
         onClick={() => setRecording(true)}
         onBlur={() => setRecording(false)}
@@ -779,12 +785,22 @@ function Page({
             return (
               <Row key={action} label={HOTKEY_LABELS[action]} group>
                 <div class="shortcut-wrap">
-                  <Shortcut action={action} value={s.hotkeys[action]} invalid={Boolean(failure)} />
+                  <Shortcut
+                    action={action}
+                    value={s.hotkeys[action]}
+                    invalid={Boolean(failure)}
+                    describedBy={failure ? `hotkey-warn-${action}` : undefined}
+                  />
                   {failure && (
-                    <small class="shortcut-warn" role="alert" data-testid={`hotkey-warn-${action}`}>
+                    <small
+                      id={`hotkey-warn-${action}`}
+                      class="shortcut-warn"
+                      role="alert"
+                      data-testid={`hotkey-warn-${action}`}
+                    >
                       {failure.conflictWith
                         ? `Conflicts with ${HOTKEY_LABELS[failure.conflictWith]}`
-                        : 'Already in use by another app'}
+                        : 'Could not register; may be in use by another app'}
                     </small>
                   )}
                 </div>

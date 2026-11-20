@@ -73,14 +73,18 @@ describe('hotkeys', () => {
     try {
       const hotkeys = {
         ...DEFAULT_SETTINGS.hotkeys,
-        captureArea: 'Alt+Shift+X',
-        captureScreen: 'Alt+Shift+X',
+        captureArea: 'Ctrl+Shift+X',
+        captureScreen: 'Shift+CommandOrControl+x',
       };
       const report = registerHotkeys(hotkeys, () => {});
       expect(report.registered).toContain('captureArea');
       expect(report.registered).not.toContain('captureScreen');
       expect(report.failed).toEqual([
-        { action: 'captureScreen', accelerator: 'Alt+Shift+X', conflictWith: 'captureArea' },
+        {
+          action: 'captureScreen',
+          accelerator: 'Shift+CommandOrControl+x',
+          conflictWith: 'captureArea',
+        },
       ]);
       expect(registerMock).toHaveBeenCalledTimes(4);
     } finally {
@@ -111,7 +115,7 @@ describe('hotkeys', () => {
     ]);
     expect(singleFailure).toEqual({
       title: 'Shortcut unavailable',
-      body: 'Capture area (Alt+Shift+X) is already used by another app.',
+      body: 'Capture area (Alt+Shift+X) could not be registered; it may already be in use by another app.',
     });
 
     const singleConflict = formatHotkeyFailureNotification([

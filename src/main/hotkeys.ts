@@ -12,6 +12,30 @@ export type { HotkeyFailure, HotkeyReport } from '../shared/ipc';
 let registered = new Map<string, HotkeyAction>();
 let latestReport: HotkeyReport = { registered: [], failed: [] };
 
+const MODIFIER_ALIASES: Record<string, string> = {
+  ctrl: 'commandorcontrol',
+  control: 'commandorcontrol',
+  cmdorctrl: 'commandorcontrol',
+  commandorcontrol: 'commandorcontrol',
+  cmd: 'super',
+  command: 'super',
+  meta: 'super',
+  super: 'super',
+  option: 'alt',
+  alt: 'alt',
+  shift: 'shift',
+};
+
+function canonicalAccelerator(accelerator: string): string {
+  const tokens = accelerator
+    .split('+')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+  const key = tokens.pop() ?? '';
+  const mods = [...new Set(tokens.map((t) => MODIFIER_ALIASES[t] ?? t))].sort();
+  return [...mods, key].join('+');
+}
+
 export function getHotkeyReport(): HotkeyReport {
   return latestReport;
 }
@@ -27,7 +51,8 @@ export function registerHotkeys(
   for (const action of HOTKEY_ACTIONS) {
     const accelerator = hotkeys[action];
     if (!accelerator) continue;
-    const conflictWith = registered.get(accelerator);
+    const canonical = canonicalAccelerator(accelerator);
+    const conflictWith = registered.get(canonical);
     if (conflictWith) {
       report.failed.push({ action, accelerator, conflictWith });
       continue;
@@ -39,7 +64,7 @@ export function registerHotkeys(
       ok = false;
     }
     if (ok) {
-      registered.set(accelerator, action);
+      registered.set(canonical, action);
       report.registered.push(action);
     } else {
       report.failed.push({ action, accelerator });
@@ -69,7 +94,7 @@ export function formatHotkeyFailureNotification(
       title: 'Shortcut unavailable',
       body: first.conflictWith
         ? `${label} (${first.accelerator}) conflicts with ${HOTKEY_LABELS[first.conflictWith]}.`
-        : `${label} (${first.accelerator}) is already used by another app.`,
+        : `${label} (${first.accelerator}) could not be registered; it may already be in use by another app.`,
     };
   }
   const list = failed.map((f) => `${HOTKEY_LABELS[f.action]} (${f.accelerator})`).join(', ');
