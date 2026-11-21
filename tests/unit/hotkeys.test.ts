@@ -80,7 +80,7 @@ describe('hotkeys', () => {
     });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
-      const report = registerHotkeys(DEFAULT_SETTINGS.hotkeys, () => {});
+      const report = registerHotkeys(DEFAULT_SETTINGS.hotkeys, () => {}, { portal: false });
       expect(report.failed).toEqual([
         { action: 'captureArea', accelerator: 'Alt+Shift+X' },
         { action: 'captureScreen', accelerator: 'Alt+Shift+F' },
@@ -101,7 +101,7 @@ describe('hotkeys', () => {
         captureArea: 'Ctrl+Shift+X',
         captureScreen: 'Shift+CommandOrControl+x',
       };
-      const report = registerHotkeys(hotkeys, () => {});
+      const report = registerHotkeys(hotkeys, () => {}, { portal: false });
       expect(report.registered).toContain('captureArea');
       expect(report.registered).not.toContain('captureScreen');
       expect(report.failed).toEqual([
