@@ -63,6 +63,24 @@ export function parseCli(argv: readonly string[], workingDirectory?: string): Cl
 }
 
 /**
+ * Handles a second-instance launch: dispatches any parsed CLI commands, or on
+ * a bare re-launch focuses an existing app window or opens Settings.
+ */
+export function handleSecondInstance(
+  argv: readonly string[],
+  workingDirectory: string | undefined,
+  dispatch: (action: AppAction, file?: string) => void,
+  focusExistingWindow: () => boolean,
+): void {
+  const commands = parseCli(argv, workingDirectory);
+  if (commands.length > 0) {
+    for (const command of commands) dispatch(command.action, command.file);
+    return;
+  }
+  if (!focusExistingWindow()) dispatch('settings');
+}
+
+/**
  * Files anyshot opens when they are passed bare, as "Open with" does
  * (`anyshot.exe "C:\shot.png"` on Windows, `anyshot %U` from a Linux desktop entry).
  */

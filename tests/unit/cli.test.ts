@@ -1,7 +1,7 @@
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { describe, expect, it } from 'vitest';
-import { parseCli } from '../../src/main/cli';
+import { describe, expect, it, vi } from 'vitest';
+import { handleSecondInstance, parseCli } from '../../src/main/cli';
 
 describe('command line', () => {
   it('maps flags to actions and ignores the rest', () => {
@@ -54,5 +54,55 @@ describe('command line', () => {
     expect(parseCli(['anyshot', 'shot.png'], caller)).toEqual([
       { action: 'openImage', file: join(caller, 'shot.png') },
     ]);
+  });
+
+  describe('second-instance handling', () => {
+    it('opens settings on a bare re-launch when no app window is open', () => {
+      const dispatch = vi.fn();
+      const focusExistingWindow = vi.fn(() => false);
+
+      handleSecondInstance(
+        ['C:\\Program Files\\anyshot\\anyshot.exe'],
+        undefined,
+        dispatch,
+        focusExistingWindow,
+      );
+
+      expect(focusExistingWindow).toHaveBeenCalledOnce();
+      expect(dispatch).toHaveBeenCalledExactlyOnceWith('settings');
+    });
+
+    it('focuses an existing app window on a bare re-launch without opening settings', () => {
+      const dispatch = vi.fn();
+      const focusExistingWindow = vi.fn(() => true);
+
+      handleSecondInstance(
+        ['C:\\Program Files\\anyshot\\anyshot.exe', '--allow-file-access-from-files'],
+        undefined,
+        dispatch,
+        focusExistingWindow,
+      );
+
+      expect(focusExistingWindow).toHaveBeenCalledOnce();
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    it('dispatches CLI flags and file paths without focusing or opening settings', () => {
+      const dispatch = vi.fn();
+      const focusExistingWindow = vi.fn(() => true);
+      const caller = resolve('caller');
+
+      handleSecondInstance(
+        ['anyshot', '--capture-ocr', 'shot.png'],
+        caller,
+        dispatch,
+        focusExistingWindow,
+      );
+
+      expect(focusExistingWindow).not.toHaveBeenCalled();
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(dispatch).toHaveBeenNthCalledWith(1, 'captureOcr', undefined);
+      expect(dispatch).toHaveBeenNthCalledWith(2, 'openImage', join(caller, 'shot.png'));
+    });
   });
 });

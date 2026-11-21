@@ -2,14 +2,14 @@ import { app, Menu } from 'electron';
 import type { Settings } from '../shared/settings';
 import { runAction, setCaptureDelay } from './actions';
 import { onAppState } from './app-state';
-import { type AppAction, parseCli } from './cli';
+import { type AppAction, handleSecondInstance, parseCli } from './cli';
 import { notifyHotkeyFailures, registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { registerIpc } from './ipc-handlers';
 import { isTest } from './paths';
 import { registerAppScheme } from './protocol';
 import { getSettings, loadSettings, onSettingsChanged } from './settings-store';
 import { createTray, trayTemplate, updateTray } from './tray';
-import { broadcast } from './windows';
+import { broadcast, focusExisting } from './windows';
 
 if (!app.requestSingleInstanceLock()) {
   app.exit(0);
@@ -40,7 +40,9 @@ function applyHotkeys(hotkeys: Settings['hotkeys']): void {
 }
 
 app.on('second-instance', (_event, argv, workingDirectory) => {
-  for (const command of parseCli(argv, workingDirectory)) dispatch(command.action, command.file);
+  handleSecondInstance(argv, workingDirectory, dispatch, () =>
+    (['settings', 'history', 'editor'] as const).some(focusExisting),
+  );
 });
 
 // Stay in the tray when the last window closes.
