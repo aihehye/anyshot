@@ -287,6 +287,7 @@ function Shortcut(props: {
         type="button"
         class={`keys${recording ? ' recording' : ''}${props.invalid ? ' invalid' : ''}`}
         data-testid={`hotkey-${props.action}`}
+        aria-invalid={props.invalid ? 'true' : undefined}
         aria-describedby={props.describedBy}
         aria-label={`${HOTKEY_LABELS[props.action]} shortcut (${recording ? 'press keys' : props.value || 'none'})`}
         onClick={() => setRecording(true)}
@@ -773,6 +774,7 @@ function Page({
       );
     case 'shortcuts': {
       const failedByAction = new Map((hotkeyReport?.failed ?? []).map((f) => [f.action, f]));
+      const unconfirmed = new Set(hotkeyReport?.unconfirmed ?? []);
       return (
         <>
           <p class="note">
@@ -782,6 +784,8 @@ function Page({
           </p>
           {HOTKEY_ACTIONS.map((action) => {
             const failure = failedByAction.get(action);
+            const isUnconfirmed = !failure && unconfirmed.has(action);
+            const statusId = failure || isUnconfirmed ? `hotkey-warn-${action}` : undefined;
             return (
               <Row key={action} label={HOTKEY_LABELS[action]} group>
                 <div class="shortcut-wrap">
@@ -789,18 +793,28 @@ function Page({
                     action={action}
                     value={s.hotkeys[action]}
                     invalid={Boolean(failure)}
-                    describedBy={failure ? `hotkey-warn-${action}` : undefined}
+                    describedBy={statusId}
                   />
                   {failure && (
                     <small
-                      id={`hotkey-warn-${action}`}
+                      id={statusId}
                       class="shortcut-warn"
-                      role="alert"
+                      role="status"
                       data-testid={`hotkey-warn-${action}`}
                     >
                       {failure.conflictWith
                         ? `Conflicts with ${HOTKEY_LABELS[failure.conflictWith]}`
-                        : 'Could not register; may be in use by another app'}
+                        : 'Could not register this shortcut'}
+                    </small>
+                  )}
+                  {isUnconfirmed && (
+                    <small
+                      id={statusId}
+                      class="shortcut-note"
+                      role="status"
+                      data-testid={`hotkey-note-${action}`}
+                    >
+                      Submitted to Wayland portal; confirmation is unavailable
                     </small>
                   )}
                 </div>

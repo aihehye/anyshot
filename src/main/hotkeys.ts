@@ -10,7 +10,11 @@ import {
 export type { HotkeyFailure, HotkeyReport } from '../shared/ipc';
 
 let registered = new Map<string, HotkeyAction>();
-let latestReport: HotkeyReport = { registered: [], failed: [] };
+let latestReport: HotkeyReport = { registered: [], unconfirmed: [], failed: [] };
+
+function isWaylandPortal(): boolean {
+  return process.platform === 'linux' && process.env.XDG_SESSION_TYPE === 'wayland';
+}
 
 const MODIFIER_ALIASES: Record<string, string> = {
   ctrl: 'commandorcontrol',
@@ -44,10 +48,12 @@ export function getHotkeyReport(): HotkeyReport {
 export function registerHotkeys(
   hotkeys: Settings['hotkeys'],
   run: (action: HotkeyAction) => void,
+  options?: { portal?: boolean },
 ): HotkeyReport {
   globalShortcut.unregisterAll();
   registered = new Map();
-  const report: HotkeyReport = { registered: [], failed: [] };
+  const portal = options?.portal ?? isWaylandPortal();
+  const report: HotkeyReport = { registered: [], unconfirmed: [], failed: [] };
   for (const action of HOTKEY_ACTIONS) {
     const accelerator = hotkeys[action];
     if (!accelerator) continue;
@@ -65,7 +71,8 @@ export function registerHotkeys(
     }
     if (ok) {
       registered.set(canonical, action);
-      report.registered.push(action);
+      if (portal) report.unconfirmed.push(action);
+      else report.registered.push(action);
     } else {
       report.failed.push({ action, accelerator });
     }
@@ -80,7 +87,7 @@ export function registerHotkeys(
 export function unregisterHotkeys(): void {
   globalShortcut.unregisterAll();
   registered.clear();
-  latestReport = { registered: [], failed: [] };
+  latestReport = { registered: [], unconfirmed: [], failed: [] };
 }
 
 export function formatHotkeyFailureNotification(
@@ -94,7 +101,7 @@ export function formatHotkeyFailureNotification(
       title: 'Shortcut unavailable',
       body: first.conflictWith
         ? `${label} (${first.accelerator}) conflicts with ${HOTKEY_LABELS[first.conflictWith]}.`
-        : `${label} (${first.accelerator}) could not be registered; it may already be in use by another app.`,
+        : `${label} (${first.accelerator}) could not be registered.`,
     };
   }
   const list = failed.map((f) => `${HOTKEY_LABELS[f.action]} (${f.accelerator})`).join(', ');

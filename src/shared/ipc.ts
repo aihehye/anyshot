@@ -222,6 +222,8 @@ export interface HotkeyFailure {
 
 export interface HotkeyReport {
   registered: HotkeyAction[];
+  /** Submitted to the Wayland GlobalShortcuts portal; binding confirmation is unavailable. */
+  unconfirmed: HotkeyAction[];
   failed: HotkeyFailure[];
 }
 

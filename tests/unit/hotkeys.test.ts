@@ -35,8 +35,9 @@ describe('hotkeys', () => {
   });
 
   it('registers configured accelerators and updates getHotkeyReport', () => {
-    const report = registerHotkeys(DEFAULT_SETTINGS.hotkeys, () => {});
+    const report = registerHotkeys(DEFAULT_SETTINGS.hotkeys, () => {}, { portal: false });
     expect(report.failed).toEqual([]);
+    expect(report.unconfirmed).toEqual([]);
     expect(report.registered).toEqual([
       'captureArea',
       'captureScreen',
@@ -45,6 +46,30 @@ describe('hotkeys', () => {
       'history',
     ]);
     expect(getHotkeyReport()).toEqual(report);
+  });
+
+  it('marks Wayland portal submissions as unconfirmed while still detecting conflicts', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const hotkeys = {
+        ...DEFAULT_SETTINGS.hotkeys,
+        captureArea: 'Ctrl+Shift+X',
+        captureScreen: 'Shift+CommandOrControl+x',
+      };
+      const report = registerHotkeys(hotkeys, () => {}, { portal: true });
+      expect(report.registered).toEqual([]);
+      expect(report.unconfirmed).toEqual(['captureArea', 'captureOcr', 'recordArea', 'history']);
+      expect(report.failed).toEqual([
+        {
+          action: 'captureScreen',
+          accelerator: 'Shift+CommandOrControl+x',
+          conflictWith: 'captureArea',
+        },
+      ]);
+      expect(getHotkeyReport()).toEqual(report);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('records globalShortcut.register failures and thrown errors', () => {
@@ -99,7 +124,7 @@ describe('hotkeys', () => {
       registerHotkeys(DEFAULT_SETTINGS.hotkeys, () => {});
       expect(getHotkeyReport().failed.length).toBeGreaterThan(0);
       unregisterHotkeys();
-      expect(getHotkeyReport()).toEqual({ registered: [], failed: [] });
+      expect(getHotkeyReport()).toEqual({ registered: [], unconfirmed: [], failed: [] });
     } finally {
       warn.mockRestore();
     }
@@ -115,7 +140,7 @@ describe('hotkeys', () => {
     ]);
     expect(singleFailure).toEqual({
       title: 'Shortcut unavailable',
-      body: 'Capture area (Alt+Shift+X) could not be registered; it may already be in use by another app.',
+      body: 'Capture area (Alt+Shift+X) could not be registered.',
     });
 
     const singleConflict = formatHotkeyFailureNotification([

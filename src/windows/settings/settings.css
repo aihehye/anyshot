@@ -149,6 +149,10 @@ input[type="radio"] {
   color: var(--warn-fg);
   font-size: 12px;
 }
+.shortcut-note {
+  color: var(--bar-muted);
+  font-size: 12px;
+}
 .keys.invalid {
   border-color: var(--warn-fg);
 }
