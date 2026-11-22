@@ -28,7 +28,10 @@ const serial = serialQueue();
 const holds = new Map<string, number>();
 /** Entries queued for background disk flush, served immediately from memory until persisted. */
 const pendingEntries = new Map<string, HistoryEntry>();
-const pendingMedia = new Map<string, { png: Uint8Array; thumb?: Uint8Array }>();
+const pendingMedia = new Map<
+  string,
+  { png: Uint8Array; thumb?: Uint8Array; edit?: EditableSource }
+>();
 const pendingWrites = new Map<string, Promise<void>>();
 
 const indexFile = () => join(paths.historyDir, 'index.json');
@@ -86,11 +89,25 @@ async function load(): Promise<HistoryEntry[]> {
   return loading;
 }
 
+function notifyHistoryChanged(): void {
+  // Open history windows reload, so captures finished after they opened still appear.
+  for (const win of windowsOf('history')) send(win, 'history:changed', undefined);
+}
+
 async function persist(next: HistoryEntry[]): Promise<void> {
   await writeFileAtomic(indexFile(), JSON.stringify(next, null, 1));
   entries = next;
-  // Open history windows reload, so captures finished after they opened still appear.
-  for (const win of windowsOf('history')) send(win, 'history:changed', undefined);
+  notifyHistoryChanged();
+}
+
+function deletePending(id: string): boolean {
+  const hadEntry = pendingEntries.delete(id);
+  const hadMedia = pendingMedia.delete(id);
+  return hadEntry || hadMedia;
+}
+
+function pendingNewestFirst(): HistoryEntry[] {
+  return [...pendingEntries.values()].reverse().sort((a, b) => b.createdAt - a.createdAt);
 }
 
 /**
@@ -126,9 +143,22 @@ async function prune(): Promise<void> {
   for (const [i, entry] of list.entries()) {
     (i < limit || holds.has(entry.id) ? keep : drop).push(entry);
   }
-  if (drop.length === 0) return;
-  await persist(keep);
-  await removeFiles(drop);
+  let droppedPending = false;
+  if (pendingEntries.size > 0) {
+    for (const [i, entry] of pendingNewestFirst().entries()) {
+      if (pendingWrites.has(entry.id) || holds.has(entry.id)) continue;
+      const newerOnDisk = keep.filter((d) => d.createdAt > entry.createdAt).length;
+      if (i + newerOnDisk >= limit && deletePending(entry.id)) {
+        droppedPending = true;
+      }
+    }
+  }
+  if (drop.length > 0) {
+    await persist(keep);
+    await removeFiles(drop);
+  } else if (droppedPending) {
+    notifyHistoryChanged();
+  }
 }
 
 const isSide = (v: unknown): v is number => Number.isInteger(v) && (v as number) > 0;
@@ -192,14 +222,46 @@ async function writeEditable(id: string, edit: EditableSource | undefined): Prom
   );
 }
 
+function editableToProject(edit: EditableSource): Project {
+  return {
+    doc: edit.doc,
+    image: {
+      mime: edit.source.mime,
+      width: edit.source.width,
+      height: edit.source.height,
+    },
+    bytes: new Uint8Array(edit.source.bytes),
+  };
+}
+
+async function writeEntryMedia(
+  id: string,
+  png: Uint8Array,
+  thumb: Uint8Array | undefined,
+  edit: EditableSource | undefined,
+): Promise<void> {
+  // Settle every write before cleanup so an in-flight writeEditable rename cannot outlive removeFiles.
+  const results = await Promise.allSettled([
+    writeFile(imagePath(id), png),
+    ...(thumb ? [writeFile(thumbPath(id), thumb)] : []),
+    ...(edit ? [writeEditable(id, edit)] : []),
+  ]);
+  const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (failed) throw failed.reason;
+}
+
 /**
  * The entry's original pixels and annotation document, or null when it only
  * has a rendered image (older entries, plain captures) or the stored project
  * is malformed; callers then open the rendered image instead.
  */
 export async function readEditable(id: string): Promise<Project | null> {
+  const media = pendingMedia.get(id);
+  if (media?.edit) return editableToProject(media.edit);
   const write = pendingWrites.get(id);
   if (write) await write;
+  const retained = pendingMedia.get(id);
+  if (retained?.edit) return editableToProject(retained.edit);
   let bytes: Uint8Array;
   try {
     bytes = new Uint8Array(await readFile(projectPath(id)));
@@ -304,6 +366,7 @@ export function queueEntry(input: QueueEntryInput, perf?: PerfMetrics): HistoryE
   pendingMedia.set(entry.id, {
     png: input.png,
     ...(eagerThumb ? { thumb: eagerThumb } : {}),
+    ...(input.edit ? { edit: input.edit } : {}),
   });
 
   const writePromise = serial(async () => {
@@ -317,14 +380,7 @@ export function queueEntry(input: QueueEntryInput, perf?: PerfMetrics): HistoryE
       const thumbArr = rawThumb ? new Uint8Array(rawThumb) : undefined;
       const media = pendingMedia.get(entry.id);
       if (media && thumbArr) media.thumb = thumbArr;
-      // Settle every write before cleanup so an in-flight writeEditable rename cannot outlive removeFiles.
-      const results = await Promise.allSettled([
-        writeFile(imagePath(entry.id), input.png),
-        ...(thumbArr ? [writeFile(thumbPath(entry.id), thumbArr)] : []),
-        ...(input.edit ? [writeEditable(entry.id, input.edit)] : []),
-      ]);
-      const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
-      if (failed) throw failed.reason;
+      await writeEntryMedia(entry.id, input.png, thumbArr, input.edit);
       await persist([entry, ...list]);
       persisted = true;
     } catch (error) {
@@ -335,10 +391,7 @@ export function queueEntry(input: QueueEntryInput, perf?: PerfMetrics): HistoryE
       );
     } finally {
       pendingWrites.delete(entry.id);
-      if (persisted) {
-        pendingEntries.delete(entry.id);
-        pendingMedia.delete(entry.id);
-      }
+      if (persisted) deletePending(entry.id);
     }
   });
   pendingWrites.set(entry.id, writePromise);
@@ -357,8 +410,7 @@ export async function listEntries(): Promise<HistoryEntry[]> {
   if (pendingEntries.size === 0) {
     return disk.filter((e, i) => i < limit || holds.has(e.id));
   }
-  const pendingList = [...pendingEntries.values()].sort((a, b) => b.createdAt - a.createdAt);
-  const merged = [...pendingList, ...disk.filter((e) => !pendingEntries.has(e.id))];
+  const merged = [...pendingNewestFirst(), ...disk.filter((e) => !pendingEntries.has(e.id))];
   return merged.filter((e, i) => i < limit || holds.has(e.id));
 }
 
@@ -376,6 +428,12 @@ export function getRetainedEntry(id: string): Promise<HistoryEntry | undefined> 
 
 export function updateEntry(id: string, patch: Partial<Omit<HistoryEntry, 'id'>>): Promise<void> {
   return serial(async () => {
+    const pending = pendingEntries.get(id);
+    if (pending) {
+      pendingEntries.set(id, { ...pending, ...patch });
+      notifyHistoryChanged();
+      return;
+    }
     const list = await load();
     await persist(list.map((e) => (e.id === id ? { ...e, ...patch } : e)));
   });
@@ -392,8 +450,15 @@ export async function readImage(id: string): Promise<Uint8Array> {
 export function removeEntry(id: string): Promise<void> {
   return serial(async () => {
     const list = await load();
-    await persist(list.filter((e) => e.id !== id));
-    await removeFiles(list.filter((e) => e.id === id));
+    const hadPending = deletePending(id);
+    const next = list.filter((e) => e.id !== id);
+    const dropped = list.filter((e) => e.id === id);
+    if (dropped.length > 0) {
+      await persist(next);
+      await removeFiles(dropped);
+    } else if (hadPending) {
+      notifyHistoryChanged();
+    }
   });
 }
 
@@ -403,8 +468,16 @@ export function clearHistory(): Promise<void> {
     // Decide once: a hold released during the write must not delete a kept entry.
     const keep = list.filter((e) => holds.has(e.id));
     const drop = list.filter((e) => !holds.has(e.id));
-    await persist(keep);
-    await removeFiles(drop);
+    let droppedPending = false;
+    for (const id of new Set([...pendingEntries.keys(), ...pendingMedia.keys()])) {
+      if (!holds.has(id) && deletePending(id)) droppedPending = true;
+    }
+    if (drop.length > 0) {
+      await persist(keep);
+      await removeFiles(drop);
+    } else if (droppedPending) {
+      notifyHistoryChanged();
+    }
   });
 }
 
@@ -421,6 +494,12 @@ registerMediaRoute('history', async (rest) => {
       }
       const write = pendingWrites.get(id);
       if (write) await write;
+      const retained = pendingMedia.get(id);
+      if (retained?.thumb) {
+        return new Response(retained.thumb as Uint8Array<ArrayBuffer>, {
+          headers: { 'content-type': detectImageMime(retained.thumb, 'image/webp') },
+        });
+      }
       // Entries added without a thumbnail (e.g. pinned from the clipboard) fall back to the image.
       const thumb = await readFile(thumbPath(id)).catch(() => null);
       if (thumb) {
@@ -428,8 +507,8 @@ registerMediaRoute('history', async (rest) => {
           headers: { 'content-type': detectImageMime(thumb, 'image/webp') },
         });
       }
-      if (media?.png) {
-        return new Response(media.png as Uint8Array<ArrayBuffer>, {
+      if (retained?.png) {
+        return new Response(retained.png as Uint8Array<ArrayBuffer>, {
           headers: { 'content-type': 'image/png' },
         });
       }
@@ -474,20 +553,45 @@ export function replaceImage(
 ): Promise<HistoryEntry | undefined> {
   return serial(async () => {
     const list = await load();
-    const entry = list.find((e) => e.id === id);
+    const diskEntry = list.find((e) => e.id === id);
+    const pendingEntry = diskEntry ? undefined : pendingEntries.get(id);
+    const entry = diskEntry ?? pendingEntry;
     if (!entry) return undefined;
-    // All or nothing: if any file or the index can't be written, the previous
-    // image, thumbnail and project come back, so the entry never shows a new
-    // image with an old document (or the reverse).
-    const files = [imagePath(id), thumbPath(id), projectPath(id)];
-    const previous = await Promise.all(files.map(readIfExists));
-    const updated = {
+    const updated: HistoryEntry = {
       ...entry,
       width: input.width,
       height: input.height,
       updatedAt: Date.now(),
       ...(input.savedPath ? { savedPath: input.savedPath } : {}),
     };
+    if (pendingEntry) {
+      const thumbArr = input.thumb ? new Uint8Array(input.thumb) : undefined;
+      try {
+        await ensureHistoryDir();
+        await writeEntryMedia(id, input.png, thumbArr, input.edit);
+        await persist([updated, ...list]);
+        deletePending(id);
+      } catch (error) {
+        await removeFiles([updated]).catch(() => undefined);
+        pendingEntries.set(id, updated);
+        pendingMedia.set(id, {
+          png: input.png,
+          ...(thumbArr ? { thumb: thumbArr } : {}),
+          ...(input.edit ? { edit: input.edit } : {}),
+        });
+        notifyHistoryChanged();
+        console.error(
+          '[history] background write failed; keeping updated entry in memory for this session',
+          error,
+        );
+      }
+      return updated;
+    }
+    // All or nothing: if any file or the index can't be written, the previous
+    // image, thumbnail and project come back, so the entry never shows a new
+    // image with an old document (or the reverse).
+    const files = [imagePath(id), thumbPath(id), projectPath(id)];
+    const previous = await Promise.all(files.map(readIfExists));
     try {
       await writeFileAtomic(imagePath(id), input.png);
       if (input.thumb) await writeFileAtomic(thumbPath(id), new Uint8Array(input.thumb));

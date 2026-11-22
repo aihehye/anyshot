@@ -321,7 +321,7 @@ describe('history', () => {
       expect(existsSync(history.projectPath('plain'))).toBe(false);
     });
 
-    it('keeps failed queueEntry media recoverable in memory after all writes settle', async () => {
+    it('keeps failed queueEntry media and editable document recoverable in memory after all writes settle', async () => {
       state.failWrite = (path) => path.endsWith('.anyshot');
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
@@ -338,6 +338,148 @@ describe('history', () => {
         expect(existsSync(history.projectPath(entry.id))).toBe(false);
         expect((await history.listEntries()).map((e) => e.id)).toContain(entry.id);
         expect([...(await history.readImage(entry.id))]).toEqual([...png]);
+        const project = await history.readEditable(entry.id);
+        expect(project?.doc).toEqual(doc([{ id: 'a', kind: 'line' }]));
+        expect(project?.image).toEqual({ mime: 'image/png', width: 4, height: 3 });
+        expect([...(project?.bytes ?? [])]).toEqual([9, 8, 7]);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('removeEntry deletes retained failed queueEntry from memory', async () => {
+      state.failWrite = (path) => path.endsWith('.anyshot');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const entry = history.queueEntry({
+          png,
+          thumb: new Uint8Array([1, 2]).buffer,
+          width: 4,
+          height: 3,
+          edit: edit(),
+        });
+        await history.flushHistory();
+        await history.removeEntry(entry.id);
+        expect((await history.listEntries()).map((e) => e.id)).not.toContain(entry.id);
+        expect(await history.getEntry(entry.id)).toBeUndefined();
+        expect(await history.readEditable(entry.id)).toBeNull();
+        await expect(history.readImage(entry.id)).rejects.toThrow();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('clearHistory removes unheld retained failures while preserving held ones', async () => {
+      state.failWrite = (path) => path.endsWith('.anyshot');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const held = history.queueEntry({
+          png,
+          thumb: new Uint8Array([1, 2]).buffer,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'held', kind: 'line' }]),
+        });
+        const free = history.queueEntry({
+          png,
+          thumb: new Uint8Array([3, 4]).buffer,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'free', kind: 'line' }]),
+        });
+        await history.flushHistory();
+        history.release(free.id);
+        await history.clearHistory();
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([held.id]);
+        expect((await history.readEditable(held.id))?.doc).toEqual(
+          doc([{ id: 'held', kind: 'line' }]),
+        );
+        expect([...(await history.readImage(held.id))]).toEqual([...png]);
+        expect(await history.getEntry(free.id)).toBeUndefined();
+        expect(await history.readEditable(free.id)).toBeNull();
+        await expect(history.readImage(free.id)).rejects.toThrow();
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('prunes unheld retained failures past historySize while keeping held ones', async () => {
+      state.failWrite = (path) => path.endsWith('.anyshot');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        state.historySize = 1;
+        const older = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'older', kind: 'line' }]),
+        });
+        const newer = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'newer', kind: 'rect' }]),
+        });
+        await history.flushHistory();
+        // Keep older held across the first release; it survives pruning until released.
+        history.release(newer.id);
+        await history.flushHistory();
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newer.id, older.id]);
+        expect((await history.readEditable(older.id))?.doc).toEqual(
+          doc([{ id: 'older', kind: 'line' }]),
+        );
+        history.release(older.id);
+        await history.flushHistory();
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newer.id]);
+        expect(await history.getEntry(older.id)).toBeUndefined();
+        expect(await history.readEditable(older.id)).toBeNull();
+        await expect(history.readImage(older.id)).rejects.toThrow();
+        expect((await history.readEditable(newer.id))?.doc).toEqual(
+          doc([{ id: 'newer', kind: 'rect' }]),
+        );
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('updateEntry and replaceImage update retained failures and persist when writes recover', async () => {
+      state.failWrite = (path) => path.endsWith('.anyshot');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const entry = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'v1', kind: 'line' }]),
+        });
+        await history.flushHistory();
+        await history.updateEntry(entry.id, { savedPath: '/tmp/v1.png' });
+        expect((await history.getEntry(entry.id))?.savedPath).toBe('/tmp/v1.png');
+
+        const nextPng = new Uint8Array([5, 6, 7]);
+        await history.replaceImage(entry.id, {
+          png: nextPng,
+          width: 8,
+          height: 6,
+          edit: edit([{ id: 'v2', kind: 'rect' }]),
+        });
+        expect([...(await history.readImage(entry.id))]).toEqual([5, 6, 7]);
+        expect((await history.readEditable(entry.id))?.doc).toEqual(
+          doc([{ id: 'v2', kind: 'rect' }]),
+        );
+
+        state.failWrite = undefined;
+        await history.replaceImage(entry.id, {
+          png: new Uint8Array([8, 9]),
+          width: 8,
+          height: 6,
+          edit: edit([{ id: 'v3', kind: 'rect' }]),
+        });
+        expect(existsSync(history.projectPath(entry.id))).toBe(true);
+        expect(await indexIds()).toContain(entry.id);
+        expect((await history.readEditable(entry.id))?.doc).toEqual(
+          doc([{ id: 'v3', kind: 'rect' }]),
+        );
       } finally {
         errorSpy.mockRestore();
       }

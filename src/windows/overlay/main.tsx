@@ -714,61 +714,71 @@ function standby(): void {
   });
 }
 
-async function activate(nextInit: OverlayInit, perf = new PerfTimer()): Promise<void> {
+async function activate(
+  nextInit: OverlayInit,
+  action: 'start' | 'reset',
+  perf = new PerfTimer(),
+): Promise<void> {
   standby();
   const gen = sessionGen;
-  init = nextInit;
-  const activeStart = performance.now();
-  applyTheme(init.settings);
-  ui.set({
-    audio: {
-      microphone: init.settings.recording.microphone,
-      systemAudio: init.systemAudio && init.settings.recording.systemAudio,
-    },
-  });
-  const loaded = await loadFrame(init.frameId, init.frame.width, init.frame.height, perf);
-  if (gen !== sessionGen) {
-    loaded.close();
-    return;
-  }
-  bitmap = loaded;
-  const currentAnnotator = createAnnotator(
-    stage,
-    init.frame,
-    emptyDoc(init.scaleFactor),
-    init.settings,
-    showToast,
-  );
-  annotator = currentAnnotator;
-  perf.merge(currentAnnotator.view.initPerf);
-  perf.sync('setSource', () => currentAnnotator.view.setSource(loaded));
-  perf.sync('ui_setup', () => {
-    ui.set({ phase: 'idle' });
-    if (init.selectAll) selectCapture(fullScreen(), 'screen');
-    else if (init.mode === 'last' && init.lastSelection) selectCapture(init.lastSelection, 'last');
-    if (chromeFrame) {
-      cancelAnimationFrame(chromeFrame);
-      chromeFrame = 0;
+  try {
+    init = nextInit;
+    const activeStart = performance.now();
+    applyTheme(init.settings);
+    ui.set({
+      audio: {
+        microphone: init.settings.recording.microphone,
+        systemAudio: init.systemAudio && init.settings.recording.systemAudio,
+      },
+    });
+    const loaded = await loadFrame(init.frameId, init.frame.width, init.frame.height, perf);
+    if (gen !== sessionGen) {
+      loaded.close();
+      return;
     }
-    paintChrome();
-    if (init.selectAll || (init.mode === 'last' && init.lastSelection)) afterSelected();
-  });
-  // Base canvas and chrome are painted synchronously; one frame lets the compositor commit them.
-  // When a reused warm overlay is hidden (`document.hidden`), Chromium can suspend rAF until show(),
-  // so yield a macrotask instead of deadlocking on rAF before `win.show()`.
-  const rafStart = performance.now();
-  const notifyPainted = () => {
-    if (gen !== sessionGen) return;
-    perf.mark('raf_wait', rafStart);
-    if (annotator?.view.paintPerf) perf.merge(annotator.view.paintPerf);
-    perf.mark('boot_active_total', activeStart);
-    perf.mark('boot_total');
-    void api.invoke('overlay:painted', { metrics: perf.metrics, sentEpochMs: epochMs() });
-  };
-  if (document.hidden) {
-    setTimeout(notifyPainted, 0);
-  } else {
-    requestAnimationFrame(notifyPainted);
+    bitmap = loaded;
+    const currentAnnotator = createAnnotator(
+      stage,
+      init.frame,
+      emptyDoc(init.scaleFactor),
+      init.settings,
+      showToast,
+    );
+    annotator = currentAnnotator;
+    perf.merge(currentAnnotator.view.initPerf);
+    perf.sync('setSource', () => currentAnnotator.view.setSource(loaded));
+    perf.sync('ui_setup', () => {
+      ui.set({ phase: 'idle' });
+      if (init.selectAll) selectCapture(fullScreen(), 'screen');
+      else if (init.mode === 'last' && init.lastSelection)
+        selectCapture(init.lastSelection, 'last');
+      if (chromeFrame) {
+        cancelAnimationFrame(chromeFrame);
+        chromeFrame = 0;
+      }
+      paintChrome();
+      if (init.selectAll || (init.mode === 'last' && init.lastSelection)) afterSelected();
+    });
+    // Base canvas and chrome are painted synchronously; one frame lets the compositor commit them.
+    // When a reused warm overlay is hidden (`document.hidden`), Chromium can suspend rAF until show(),
+    // so yield a macrotask instead of deadlocking on rAF before `win.show()`.
+    const rafStart = performance.now();
+    const notifyPainted = () => {
+      if (gen !== sessionGen) return;
+      perf.mark('raf_wait', rafStart);
+      if (annotator?.view.paintPerf) perf.merge(annotator.view.paintPerf);
+      perf.mark('boot_active_total', activeStart);
+      perf.mark('boot_total');
+      void api.invoke('overlay:painted', { metrics: perf.metrics, sentEpochMs: epochMs() });
+    };
+    if (document.hidden) {
+      setTimeout(notifyPainted, 0);
+    } else {
+      requestAnimationFrame(notifyPainted);
+    }
+  } catch (error) {
+    console.error(`[overlay] failed to ${action}`, error);
+    if (gen === sessionGen) void api.invoke('overlay:cancel');
   }
 }
 
@@ -791,21 +801,20 @@ function setupOnce(): void {
     standby();
   });
   api.on('overlay:reset', (nextInit) => {
-    void activate(nextInit).catch((error) => {
-      console.error('[overlay] failed to reset', error);
-      void api.invoke('overlay:cancel');
-    });
+    void activate(nextInit, 'reset');
   });
 }
 
 async function boot(): Promise<void> {
   setupOnce();
+  const bootGen = sessionGen;
   const perf = new PerfTimer();
   const initial = await perf.async('overlay_init_ipc', () => api.invoke('overlay:init'));
-  await activate(initial, perf);
+  if (bootGen !== sessionGen) return;
+  await activate(initial, 'start', perf);
 }
 
 boot().catch((error) => {
   console.error('[overlay] failed to start', error);
-  void api.invoke('overlay:cancel');
+  if (sessionGen === 0) void api.invoke('overlay:cancel');
 });
