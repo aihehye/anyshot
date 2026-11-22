@@ -7,6 +7,7 @@ import { isBlankDoc, translateDoc } from '../../engine/document';
 import { DEFAULT_EFFECTS, emptyDoc, screenshotDoc } from '../../engine/model';
 import type { Point, Rect } from '../../shared/geometry';
 import type { DeliverAction, OverlayInit, RawImage, RecordAudio } from '../../shared/ipc';
+import { epochMs, PerfTimer } from '../../shared/perf';
 import {
   flippedHandle,
   moveSelection,
@@ -60,13 +61,14 @@ const selEl = byId('selection');
 const sizeEl = byId('size');
 
 let init: OverlayInit;
-let bitmap: ImageBitmap;
-let annotator: Annotator;
+let bitmap: ImageBitmap | null = null;
+let annotator: Annotator | null = null;
 let selection: Rect | null = null;
 let automaticBeautify = DEFAULT_EFFECTS.beautify;
 let drag: Drag | null = null;
 let spaceHeld = false;
 let chromeFrame = 0;
+let sessionGen = 0;
 
 function byId(id: string): HTMLElement {
   const el = document.getElementById(id);
@@ -130,7 +132,7 @@ function buildHandles(): void {
 function setSelection(rect: Rect | null, commit = true): void {
   selection = rect;
   // The selection is the picture here: measurements stay inside it.
-  annotator.view.setImageArea(rect && toImageRegion(rect, init.scaleFactor, init.frame));
+  annotator?.view.setImageArea(rect && toImageRegion(rect, init.scaleFactor, init.frame));
   scheduleChrome();
   if (commit) {
     ui.set({ selection: rect, phase: rect ? 'selected' : 'idle' });
@@ -143,6 +145,7 @@ function fullScreen(): Rect {
 }
 
 function selectCapture(rect: Rect, mode: 'area' | 'last' | 'screen'): void {
+  if (!annotator) return;
   const { docs } = annotator;
   if (init.mode !== 'ocr' && !isRecordingSetup()) {
     const { beautify } = screenshotDoc(docs.doc.unit, init.settings.capture.beautify, mode).effects;
@@ -176,7 +179,7 @@ function onPointerDown(e: PointerEvent): void {
     if (handle) drag = { type: 'resize', handle };
     else if (spaceHeld) drag = { type: 'move', start: p, origin: selection };
     else if (isRecordingSetup()) return;
-    else if (annotator.view.pointerDown(e)) drag = { type: 'engine' };
+    else if (annotator?.view.pointerDown(e)) drag = { type: 'engine' };
     else return;
     if (drag.type !== 'engine') ui.set({ dragging: true });
   } else {
@@ -191,7 +194,7 @@ function onPointerMove(e: PointerEvent): void {
   const p = pointOf(e);
   switch (drag.type) {
     case 'engine':
-      annotator.view.pointerMove(e);
+      annotator?.view.pointerMove(e);
       return;
     case 'new': {
       const { start } = drag;
@@ -222,7 +225,7 @@ function onPointerUp(e: PointerEvent): void {
   drag = null;
   if (!current) return;
   if (current.type === 'engine') {
-    annotator.view.pointerUp(e);
+    annotator?.view.pointerUp(e);
     return;
   }
   // A click without a drag selects the whole display.
@@ -278,7 +281,7 @@ function onDoubleClick(e: MouseEvent): void {
     p.x <= selection.x + selection.width &&
     p.y >= selection.y &&
     p.y <= selection.y + selection.height;
-  if (inside && !annotator.view.busy && !annotator.view.hits(e.clientX, e.clientY))
+  if (inside && annotator && !annotator.view.busy && !annotator.view.hits(e.clientX, e.clientY))
     void finish('copy');
 }
 
@@ -304,7 +307,7 @@ function onKeyDown(e: KeyboardEvent): void {
   }
   // An open popover takes Esc first (see dismissPopovers).
   if (e.key === 'Escape') {
-    if (!annotator.view.keyDown(e)) void api.invoke('overlay:cancel');
+    if (!annotator?.view.keyDown(e)) void api.invoke('overlay:cancel');
     return;
   }
   const phase = ui.get().phase;
@@ -327,7 +330,7 @@ function onKeyDown(e: KeyboardEvent): void {
   else if (!mod && key === 'e') void finish('editor');
   else if (!mod && key === 'f') void finish('pin');
   else if (!mod && key === 'u') void finish('upload');
-  else if (annotator.handleKey(e)) e.preventDefault();
+  else if (annotator?.handleKey(e)) e.preventDefault();
 }
 
 function onKeyUp(e: KeyboardEvent): void {
@@ -339,11 +342,11 @@ function onKeyUp(e: KeyboardEvent): void {
 
 // ---------------------------------------------------------------- finishing
 
-function rawRegion(region: Rect): RawImage {
+function rawRegion(source: ImageBitmap, region: Rect): RawImage {
   const canvas = new OffscreenCanvas(region.width, region.height);
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('2D context unavailable');
-  ctx.drawImage(bitmap, -region.x, -region.y);
+  ctx.drawImage(source, -region.x, -region.y);
   const data = ctx.getImageData(0, 0, region.width, region.height).data;
   return { rgba: data.buffer as ArrayBuffer, width: region.width, height: region.height };
 }
@@ -357,22 +360,44 @@ function wantsSaveFormat(action: DeliverAction): boolean {
 
 /** Produces the final image and hands it to main, which closes the overlays. */
 async function finish(action: DeliverAction): Promise<void> {
-  if (!selection || ui.get().busy) return;
+  if (!selection || ui.get().busy || !annotator || !bitmap) return;
+  const currentBitmap = bitmap;
+  const perf = new PerfTimer();
   ui.set({ busy: true });
   annotator.controller.store.set({ popover: null });
   annotator.view.commitText();
   const region = toImageRegion(selection, init.scaleFactor, init.frame);
   const doc = translateDoc(annotator.docs.doc, -region.x, -region.y);
+  const screenRect = {
+    x: init.bounds.x + selection.x,
+    y: init.bounds.y + selection.y,
+    width: selection.width,
+    height: selection.height,
+  };
   try {
     if (action === 'editor') {
-      await api.invoke('capture:to-editor', { image: rawRegion(region), doc });
+      await api.invoke('capture:to-editor', { image: rawRegion(currentBitmap, region), doc });
       return;
     }
-    await api.invoke('overlay:hide');
+    const blank = isBlankDoc(doc);
+    // Fire-and-forget hide so encoding or native delivery starts without waiting for an IPC roundtrip.
+    void api.invoke('overlay:hide');
+    if (blank) {
+      perf.mark('finish_pre_ipc');
+      await api.invoke('capture:deliver-raw', {
+        action,
+        frameId: init.frameId,
+        crop: region,
+        screenRect,
+        perf: { metrics: perf.metrics, sentEpochMs: epochMs() },
+      });
+      return;
+    }
     const format = init.settings.output.imageFormat;
+    const exportStart = performance.now();
     const [out, original] = await Promise.all([
       exportImage({
-        source: bitmap,
+        source: currentBitmap,
         region,
         doc,
         ...(wantsSaveFormat(action)
@@ -385,21 +410,19 @@ async function finish(action: DeliverAction): Promise<void> {
           : {}),
       }),
       // Annotated captures also keep their original pixels, so history reopens them editable.
-      isBlankDoc(doc) ? null : exportImage({ source: bitmap, region, thumbMax: 16 }),
+      exportImage({ source: currentBitmap, region, thumbMax: 16 }),
     ]);
-    const screenRect = {
-      x: init.bounds.x + selection.x,
-      y: init.bounds.y + selection.y,
-      width: selection.width,
-      height: selection.height,
-    };
+    perf.mark('export_all_total', exportStart);
+    perf.merge(out.perf);
+    perf.mark('finish_pre_ipc');
     await api.invoke('capture:deliver', {
       action,
       image: out.png,
       thumb: out.thumb,
       screenRect,
       ...(out.save ? { saveImage: out.save } : {}),
-      ...(original ? { edit: { doc, source: original.png } } : {}),
+      edit: { doc, source: original.png },
+      perf: { metrics: perf.metrics, sentEpochMs: epochMs() },
     });
   } catch (error) {
     console.error('[overlay] finish failed', error);
@@ -610,7 +633,7 @@ function Chrome() {
           {s.toast}
         </div>
       )}
-      {s.phase === 'selected' && s.selection && !s.dragging && !s.busy && (
+      {s.phase === 'selected' && s.selection && !s.dragging && !s.busy && annotator && (
         <>
           {!isRecordingSetup() && (
             <Floating anchor={s.selection} side="below" testId="bottom">
@@ -637,17 +660,61 @@ function Chrome() {
 
 // ---------------------------------------------------------------- boot
 
-async function loadFrame(frameId: string, width: number, height: number): Promise<ImageBitmap> {
-  const response = await fetch(`/@frame/${frameId}`);
+async function loadFrame(
+  frameId: string,
+  width: number,
+  height: number,
+  perf: PerfTimer,
+): Promise<ImageBitmap> {
+  const response = await perf.async('fetch_frame', () => fetch(`/@frame/${frameId}`));
   if (!response.ok) throw new Error(`frame ${frameId}: ${response.status}`);
-  const pixels = new Uint8ClampedArray(await response.arrayBuffer());
-  const image = await createImageBitmap(new ImageData(pixels, width, height));
-  void api.invoke('frame:release', frameId);
-  return image;
+  const buffer = await perf.async('arrayBuffer', () => response.arrayBuffer());
+  const pixels = new Uint8ClampedArray(buffer);
+  // Keep the raw frame in main until endCapture() so unannotated delivery can use capture:deliver-raw.
+  return perf.async('createImageBitmap', () =>
+    createImageBitmap(new ImageData(pixels, width, height)),
+  );
 }
 
-async function boot(): Promise<void> {
-  init = await api.invoke('overlay:init');
+/** Releases per-capture GPU resources and resets UI state so a warm overlay can be reused. */
+function standby(): void {
+  sessionGen++;
+  if (chromeFrame) {
+    cancelAnimationFrame(chromeFrame);
+    chromeFrame = 0;
+  }
+  clearTimeout(toastTimer);
+  toastTimer = undefined;
+  selection = null;
+  automaticBeautify = DEFAULT_EFFECTS.beautify;
+  drag = null;
+  spaceHeld = false;
+  document.body.style.cursor = '';
+  dimEl.classList.add('off');
+  selEl.hidden = true;
+  sizeEl.hidden = true;
+  if (annotator) {
+    annotator.dispose();
+    annotator = null;
+  }
+  if (bitmap) {
+    bitmap.close();
+    bitmap = null;
+  }
+  ui.set({
+    phase: 'loading',
+    dragging: false,
+    selection: null,
+    busy: false,
+    toast: null,
+  });
+}
+
+async function activate(nextInit: OverlayInit, perf = new PerfTimer()): Promise<void> {
+  standby();
+  const gen = sessionGen;
+  init = nextInit;
+  const activeStart = performance.now();
   followTheme(init.settings);
   ui.set({
     audio: {
@@ -655,22 +722,48 @@ async function boot(): Promise<void> {
       systemAudio: init.systemAudio && init.settings.recording.systemAudio,
     },
   });
-  bitmap = await loadFrame(init.frameId, init.frame.width, init.frame.height);
-  annotator = createAnnotator(
+  const loaded = await loadFrame(init.frameId, init.frame.width, init.frame.height, perf);
+  if (gen !== sessionGen) {
+    loaded.close();
+    return;
+  }
+  bitmap = loaded;
+  const currentAnnotator = createAnnotator(
     stage,
     init.frame,
     emptyDoc(init.scaleFactor),
     init.settings,
     showToast,
   );
-  annotator.view.setSource(bitmap);
+  annotator = currentAnnotator;
+  perf.merge(currentAnnotator.view.initPerf);
+  perf.sync('setSource', () => currentAnnotator.view.setSource(loaded));
+  perf.sync('ui_setup', () => {
+    ui.set({ phase: 'idle' });
+    if (init.selectAll) selectCapture(fullScreen(), 'screen');
+    else if (init.mode === 'last' && init.lastSelection) selectCapture(init.lastSelection, 'last');
+    if (chromeFrame) {
+      cancelAnimationFrame(chromeFrame);
+      chromeFrame = 0;
+    }
+    paintChrome();
+    if (init.selectAll || (init.mode === 'last' && init.lastSelection)) afterSelected();
+  });
+  // Base canvas and chrome are painted synchronously; one frame lets the compositor commit them.
+  const rafStart = performance.now();
+  requestAnimationFrame(() => {
+    if (gen !== sessionGen) return;
+    perf.mark('raf_wait', rafStart);
+    if (annotator?.view.paintPerf) perf.merge(annotator.view.paintPerf);
+    perf.mark('boot_active_total', activeStart);
+    perf.mark('boot_total');
+    void api.invoke('overlay:painted', { metrics: perf.metrics, sentEpochMs: epochMs() });
+  });
+}
+
+function setupOnce(): void {
   buildHandles();
   render(<Chrome />, byId('ui'));
-  ui.set({ phase: 'idle' });
-  if (init.selectAll) selectCapture(fullScreen(), 'screen');
-  else if (init.mode === 'last' && init.lastSelection) selectCapture(init.lastSelection, 'last');
-  else scheduleChrome();
-  if (init.selectAll || (init.mode === 'last' && init.lastSelection)) afterSelected();
   window.addEventListener('pointerdown', onPointerDown);
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', onPointerUp);
@@ -682,8 +775,22 @@ async function boot(): Promise<void> {
   api.on('overlay:clear-selection', () => {
     if (ui.get().phase !== 'loading') setSelection(null);
   });
-  // Two frames: the screenshot is on screen before main shows the window.
-  requestAnimationFrame(() => requestAnimationFrame(() => void api.invoke('overlay:painted')));
+  api.on('overlay:standby', () => {
+    standby();
+  });
+  api.on('overlay:reset', (nextInit) => {
+    void activate(nextInit).catch((error) => {
+      console.error('[overlay] failed to reset', error);
+      void api.invoke('overlay:cancel');
+    });
+  });
+}
+
+async function boot(): Promise<void> {
+  setupOnce();
+  const perf = new PerfTimer();
+  const initial = await perf.async('overlay_init_ipc', () => api.invoke('overlay:init'));
+  await activate(initial, perf);
 }
 
 boot().catch((error) => {
