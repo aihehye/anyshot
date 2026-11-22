@@ -231,6 +231,8 @@ function createOverlayWindow(display: Display): BrowserWindow {
     hasShadow: false,
     enableLargerThanScreen: true,
     alwaysOnTop: true,
+    // Keep warm/hidden overlays unthrottled so `overlay:reset` paints and signals immediately.
+    webPreferences: { backgroundThrottling: false },
   });
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });

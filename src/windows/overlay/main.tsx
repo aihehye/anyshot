@@ -750,15 +750,22 @@ async function activate(nextInit: OverlayInit, perf = new PerfTimer()): Promise<
     if (init.selectAll || (init.mode === 'last' && init.lastSelection)) afterSelected();
   });
   // Base canvas and chrome are painted synchronously; one frame lets the compositor commit them.
+  // When a reused warm overlay is hidden (`document.hidden`), Chromium can suspend rAF until show(),
+  // so yield a macrotask instead of deadlocking on rAF before `win.show()`.
   const rafStart = performance.now();
-  requestAnimationFrame(() => {
+  const notifyPainted = () => {
     if (gen !== sessionGen) return;
     perf.mark('raf_wait', rafStart);
     if (annotator?.view.paintPerf) perf.merge(annotator.view.paintPerf);
     perf.mark('boot_active_total', activeStart);
     perf.mark('boot_total');
     void api.invoke('overlay:painted', { metrics: perf.metrics, sentEpochMs: epochMs() });
-  });
+  };
+  if (document.hidden) {
+    setTimeout(notifyPainted, 0);
+  } else {
+    requestAnimationFrame(notifyPainted);
+  }
 }
 
 function setupOnce(): void {
