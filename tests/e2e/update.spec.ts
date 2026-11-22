@@ -251,6 +251,10 @@ test('checking again after closing the window during a download shows that downl
 
 test('Update clicked during a check waits for it, and a different release found asks again', async () => {
   const page = await showOffer(ctx.app, offer());
+  // The check's offer can self-update only as an installer or AppImage; on Linux, act as an AppImage.
+  await ctx.app.evaluate(() => {
+    process.env.APPIMAGE ??= '/tmp/anyshot.AppImage';
+  });
   await fakeUpdates(ctx.app, { version: '0.4.0', hold: true });
   await clickTray(ctx.app, 'Check for updates…');
   await page.getByTestId('update-install').click();
