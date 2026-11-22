@@ -1,11 +1,13 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { mergeUpdateMetadata } from '../../scripts/merge-update-metadata';
 import {
   canSelfUpdate,
-  checkForUpdate,
+  checkNotice,
+  installKind,
+  lookForUpdate,
+  osName,
   releaseUrl,
   shortNotes,
-  type UpdateCheckDeps,
 } from '../../src/shared/update';
 
 /** Release notes as GitHub renders them: the download table, then the generated changes. */
@@ -53,58 +55,6 @@ describe('self-update', () => {
   });
 });
 
-describe('startup update check', () => {
-  const deps = (patch: Partial<UpdateCheckDeps>): UpdateCheckDeps => ({
-    enabled: true,
-    current: '0.1.2',
-    canInstall: true,
-    check: async () => ({ version: '0.2.0', releaseNotes: GITHUB_HTML }),
-    offer: vi.fn(),
-    log: vi.fn(),
-    ...patch,
-  });
-
-  it('offers a newer release with its notes', async () => {
-    const d = deps({});
-    const offer = await checkForUpdate(d);
-    expect(offer).toMatchObject({
-      version: '0.2.0',
-      current: '0.1.2',
-      canInstall: true,
-      releaseUrl: releaseUrl('0.2.0'),
-    });
-    expect(offer?.notes).toHaveLength(2);
-    expect(d.offer).toHaveBeenCalledWith(offer);
-  });
-
-  it('does nothing when disabled (development, tests, or turned off)', async () => {
-    const check = vi.fn(async () => ({ version: '0.2.0', releaseNotes: null }));
-    const d = deps({ enabled: false, check });
-    expect(await checkForUpdate(d)).toBeNull();
-    expect(check).not.toHaveBeenCalled();
-    expect(d.offer).not.toHaveBeenCalled();
-  });
-
-  it('stays quiet offline: the failure is logged, not thrown', async () => {
-    const d = deps({
-      check: async () => {
-        throw new Error('net::ERR_INTERNET_DISCONNECTED');
-      },
-    });
-    await expect(checkForUpdate(d)).resolves.toBeNull();
-    expect(d.log).toHaveBeenCalledWith(expect.stringContaining('ERR_INTERNET_DISCONNECTED'));
-    expect(d.offer).not.toHaveBeenCalled();
-  });
-
-  it('offers nothing when this is the latest release', async () => {
-    for (const found of [null, { version: '0.1.2', releaseNotes: null }]) {
-      const d = deps({ check: async () => found });
-      expect(await checkForUpdate(d)).toBeNull();
-      expect(d.offer).not.toHaveBeenCalled();
-    }
-  });
-});
-
 const yml = (arch: string, version = '0.2.0') => `version: ${version}
 files:
   - url: anyshot-Setup-${version}-${arch}.exe
@@ -114,6 +64,83 @@ path: anyshot-Setup-${version}-${arch}.exe
 sha512: ${arch}-hash==
 releaseDate: '2026-11-20T12:00:00.000Z'
 `;
+
+describe('update check', () => {
+  const lookup = { current: '0.1.2', canInstall: true };
+
+  it('reports a newer release, the latest version, or why it failed', async () => {
+    const found = await lookForUpdate({
+      ...lookup,
+      check: async () => ({ version: '0.2.0', releaseNotes: GITHUB_HTML }),
+    });
+    expect(found).toMatchObject({
+      state: 'available',
+      offer: {
+        version: '0.2.0',
+        current: '0.1.2',
+        canInstall: true,
+        releaseUrl: releaseUrl('0.2.0'),
+      },
+    });
+    expect(found.state === 'available' && found.offer.notes).toHaveLength(2);
+    expect(await lookForUpdate({ ...lookup, check: async () => null })).toEqual({
+      state: 'latest',
+      current: '0.1.2',
+    });
+    // A feed that lists the running version is no update either.
+    expect(
+      await lookForUpdate({
+        ...lookup,
+        check: async () => ({ version: '0.1.2', releaseNotes: null }),
+      }),
+    ).toEqual({ state: 'latest', current: '0.1.2' });
+    expect(
+      await lookForUpdate({
+        ...lookup,
+        check: async () => {
+          throw new Error('HttpError: 403 rate limit exceeded');
+        },
+      }),
+    ).toEqual({ state: 'error', message: 'HttpError: 403 rate limit exceeded' });
+  });
+
+  it('notifies about everything but a new release, which opens the update window', () => {
+    expect(checkNotice({ state: 'latest', current: '0.3.0' })).toEqual({
+      title: 'anyshot is up to date',
+      body: 'You have the latest version, 0.3.0.',
+    });
+    expect(checkNotice({ state: 'error', message: 'offline' })).toEqual({
+      title: 'Could not check for updates',
+      body: 'offline',
+    });
+    expect(checkNotice({ state: 'unavailable', message: 'dev' })?.title).toBe(
+      'Updates unavailable',
+    );
+    const offer = {
+      version: '0.4.0',
+      current: '0.3.0',
+      notes: [],
+      releaseUrl: releaseUrl('0.4.0'),
+      canInstall: true,
+    };
+    expect(checkNotice({ state: 'available', offer })).toBeNull();
+  });
+});
+
+describe('version details', () => {
+  it('names the install', () => {
+    expect(installKind('win32', {}, true)).toBe('Windows installer');
+    expect(installKind('linux', { APPIMAGE: '/a.AppImage' }, true)).toBe('AppImage');
+    expect(installKind('linux', {}, true)).toBe('Debian package');
+    expect(installKind('win32', {}, false)).toBe('Development build');
+  });
+
+  it('names Windows 11 although it reports 10.0', () => {
+    expect(osName('win32', '10.0.26300', 'x64')).toBe('Windows 11 (10.0.26300, x64)');
+    expect(osName('win32', '10.0.19045', 'arm64')).toBe('Windows 10 (10.0.19045, arm64)');
+    expect(osName('linux', '6.8.0-45-generic', 'x64')).toBe('Linux 6.8.0-45-generic (x64)');
+  });
+});
 
 describe('update metadata for both Windows installers', () => {
   it('lists both installers and keeps the first one as the default', () => {

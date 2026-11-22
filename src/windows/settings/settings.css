@@ -259,7 +259,49 @@ input[type="radio"] {
   filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.18));
 }
 .about h2 {
-  margin: 0 0 8px;
+  margin: 0 0 2px;
+}
+.about .about-version {
+  margin: 0 0 10px;
+  color: var(--bar-muted);
+}
+.about-update,
+.about-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
+.about-update .note {
+  margin: 0;
+}
+.reset:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.versions {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 18px;
+  max-width: 520px;
+  margin: 18px 0 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--bar-border);
+  border-radius: 8px;
+  background: var(--field-bg);
+  font-size: 13px;
+}
+.versions div {
+  display: contents;
+}
+.versions dt {
+  color: var(--bar-muted);
+}
+.versions dd {
+  margin: 0;
+  font-family: ui-monospace, monospace;
+  user-select: text;
+  overflow-wrap: anywhere;
 }
 .link {
   padding: 0;

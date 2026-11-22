@@ -7,7 +7,7 @@ import type { AutoBeautify, CustomBackground, SavedBackground } from './backgrou
 import type { Point, Rect, Size } from './geometry';
 import type { RecordingQuality } from './recording-quality';
 import type { DeepPartial, HotkeyAction, Settings, ToolChoices, ToolId } from './settings';
-import type { UpdateOffer, UpdateStatus } from './update';
+import type { UpdateCheckResult, UpdateOffer, UpdateStatus } from './update';
 
 export const APP_ORIGIN = 'app://local';
 
@@ -231,6 +231,20 @@ export interface HotkeyReport {
   failed: HotkeyFailure[];
 }
 
+/** Version details shown in Settings ▸ About. */
+export interface AppInfo {
+  version: string;
+  electron: string;
+  chromium: string;
+  node: string;
+  v8: string;
+  os: string;
+  /** How anyshot was installed: Windows installer, AppImage, Debian package, development build. */
+  install: string;
+  /** False when run from source; its version then has no release. */
+  packaged: boolean;
+}
+
 export interface Metrics {
   processes: { type: string; pid: number; cpu: number; memoryKB: number }[];
   mainHeapMB: number;
@@ -248,6 +262,7 @@ export interface InvokeContract {
   'window:set-size': Channel<Size, void>;
   'clipboard:text': Channel<string, void>;
   'shell:open-url': Channel<string, void>;
+  'app:info': Channel<void, AppInfo>;
 
   'overlay:init': Channel<void, OverlayInit>;
   'overlay:painted': Channel<void, void>;
@@ -301,6 +316,8 @@ export interface InvokeContract {
   'update:init': Channel<void, { offer: UpdateOffer; status: UpdateStatus }>;
   /** Downloads the offered update, then quits, installs it and restarts. */
   'update:install': Channel<void, void>;
+  /** Checks for a newer release now; one found also opens the update window. */
+  'update:check': Channel<void, UpdateCheckResult>;
 
   'secrets:status': Channel<
     void,
@@ -346,6 +363,7 @@ export const INVOKE_ACCESS: { readonly [K in InvokeChannel]: readonly WindowKind
   'window:set-size': ['floating', 'pin'],
   'clipboard:text': ['ocr', 'editor', 'overlay', 'settings'],
   'shell:open-url': ['ocr', 'settings', 'floating', 'update'],
+  'app:info': ['settings'],
 
   'overlay:init': ['overlay'],
   'overlay:painted': ['overlay'],
@@ -393,6 +411,7 @@ export const INVOKE_ACCESS: { readonly [K in InvokeChannel]: readonly WindowKind
 
   'update:init': ['update'],
   'update:install': ['update'],
+  'update:check': ['settings'],
 
   'secrets:status': ['settings'],
   'secrets:set': ['settings'],

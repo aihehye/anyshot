@@ -8,6 +8,7 @@ export type AppAction =
   | 'stopRecording'
   | 'togglePauseRecording'
   | 'settings'
+  | 'checkForUpdates'
   | 'openImage'
   | 'openClipboard'
   | 'quit';
