@@ -1,5 +1,7 @@
-import { type BrowserWindow, shell } from 'electron';
+import { release } from 'node:os';
+import { app, type BrowserWindow, shell } from 'electron';
 import type { ToolChoices } from '../shared/settings';
+import { installKind, osName } from '../shared/update';
 import { registerBackgrounds } from './backgrounds';
 import { copyText } from './clipboard';
 import { releaseFrame } from './frames';
@@ -33,6 +35,18 @@ export function registerIpc(): void {
   handle('shell:open-url', async (url) => {
     if (/^https?:\/\//i.test(url)) await shell.openExternal(url);
   });
+  handle('app:info', () => ({
+    version: app.getVersion(),
+    electron: process.versions.electron,
+    chromium: process.versions.chrome,
+    node: process.versions.node,
+    v8: process.versions.v8,
+    os: osName(process.platform, release(), process.arch),
+    install: installKind(process.platform, process.env, app.isPackaged),
+    packaged: app.isPackaged,
+  }));
+  // The update module loads on first use, so this works before the startup check has run.
+  handle('update:check', async () => (await import('./update')).checkNow());
   onSettingsChanged((next) => broadcast('settings:changed', next));
 }
 

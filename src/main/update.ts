@@ -1,7 +1,9 @@
-import { app, type BrowserWindow } from 'electron';
+import { app, type BrowserWindow, Notification } from 'electron';
 import {
   canSelfUpdate,
-  checkForUpdate,
+  checkNotice,
+  lookForUpdate,
+  type UpdateCheckResult,
   type UpdateOffer,
   type UpdateStatus,
 } from '../shared/update';
@@ -69,6 +71,13 @@ let updater: Updater | null = null;
 let offer: UpdateOffer | null = null;
 let status: UpdateStatus = { state: 'idle' };
 let win: BrowserWindow | null = null;
+let checking: Promise<UpdateCheckResult> | null = null;
+
+/** The updater: a test's fake, or electron-updater in packaged builds; null in development. */
+async function loadUpdater(): Promise<Updater | null> {
+  if (!updater && app.isPackaged) updater = await electronUpdater();
+  return updater;
+}
 
 /** Tests drive the update window with a fake updater. */
 export function useUpdater(next: Updater): void {
@@ -81,34 +90,73 @@ export function useUpdater(next: Updater): void {
  * user allows it; offline or failed checks are logged and otherwise ignored.
  */
 export async function checkAtStartup(): Promise<void> {
-  const enabled = app.isPackaged && !isTest && getSettings().general.checkForUpdates;
-  if (!enabled) return;
+  if (!app.isPackaged || isTest || !getSettings().general.checkForUpdates) return;
+  await checkNow();
+}
+
+/**
+ * Checks once (at startup, or when the user asks from the tray or Settings ▸
+ * About). A newer release opens the update window; checks started while one
+ * runs share its result, so the window opens once.
+ */
+export function checkNow(): Promise<UpdateCheckResult> {
+  checking ??= runCheck().finally(() => {
+    checking = null;
+  });
+  return checking;
+}
+
+async function runCheck(): Promise<UpdateCheckResult> {
+  // Asking again mid-download would replace electron-updater's release info under it.
+  if (offer && (status.state === 'downloading' || status.state === 'installing')) {
+    showUpdate(offer);
+    return { state: 'available', offer };
+  }
+  let current: Updater | null;
   try {
-    updater ??= await electronUpdater();
+    current = await loadUpdater();
   } catch (error) {
     console.warn('[update] updater unavailable', error);
-    return;
+    return { state: 'error', message: 'The updater could not be loaded.' };
   }
-  const current = updater;
-  await checkForUpdate({
-    enabled,
+  if (!current) {
+    return {
+      state: 'unavailable',
+      message: 'This is a development build. Installed builds can check for updates.',
+    };
+  }
+  const result = await lookForUpdate({
     current: app.getVersion(),
     canInstall: canSelfUpdate(process.platform, process.env),
     check: () => current.check(),
-    offer: showUpdate,
-    log: (message) => console.warn(`[update] ${message}`),
   });
+  if (result.state === 'available') showUpdate(result.offer);
+  if (result.state === 'error') console.warn(`[update] update check failed: ${result.message}`);
+  return result;
+}
+
+/** The tray has no page to show the result on: anything but a new release is a notification. */
+export async function checkFromTray(): Promise<void> {
+  const notice = checkNotice(await checkNow());
+  if (notice) new Notification(notice).show();
 }
 
 /** Shows the small update window for an offer (or brings it forward). */
 export function showUpdate(next: UpdateOffer): void {
-  offer = next;
+  // A download under way keeps going, even if its window was closed: the window
+  // comes back showing it, so Update can't start a second one.
+  const busy = status.state === 'downloading' || status.state === 'installing';
+  if (!busy) {
+    offer = next;
+    status = { state: 'idle' };
+  }
   if (win && !win.isDestroyed()) {
-    setStatus({ state: 'idle' });
+    // Reloading picks up a newer offer and clears an earlier error.
+    if (!busy) win.webContents.reload();
     win.show();
+    win.focus();
     return;
   }
-  status = { state: 'idle' };
   const created = createWindow('update', {
     width: 440,
     height: 320,

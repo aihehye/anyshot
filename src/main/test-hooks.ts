@@ -13,10 +13,18 @@ export interface TestHooks {
   settings(): unknown;
   patch(patch: unknown): Promise<unknown>;
   timings: Record<string, number[]>;
-  /** Shows the update window with a fake updater: its download reports progress, then fails or "installs". */
-  offerUpdate(offer: UpdateOffer, plan?: { fail?: string; installFail?: string }): Promise<void>;
+  /**
+   * Shows the update window with a fake updater: its download reports 30 %,
+   * waits (`holdMs`, default 300), then fails or "installs".
+   */
+  offerUpdate(
+    offer: UpdateOffer,
+    plan?: { fail?: string; installFail?: string; holdMs?: number },
+  ): Promise<void>;
   /** Runs the startup check against a fake updater and returns how often it was asked. */
   startupCheck(): Promise<number>;
+  /** Later checks ask a fake updater that finds `version` (none: up to date) or fails. */
+  fakeUpdates(plan: { version?: string; fail?: string }): Promise<void>;
   updateInstalls: number;
   /** Loads electron-updater as packaged builds do, without checking: whether it worked. */
   loadUpdater(): Promise<boolean>;
@@ -46,7 +54,7 @@ export function installTestHooks(dispatch: (action: AppAction, file?: string) =>
         check: async () => null,
         async download(onProgress) {
           onProgress(30);
-          await new Promise((r) => setTimeout(r, 300));
+          await new Promise((r) => setTimeout(r, plan.holdMs ?? 300));
           if (plan.fail) throw new Error(plan.fail);
           onProgress(100);
         },
@@ -62,6 +70,16 @@ export function installTestHooks(dispatch: (action: AppAction, file?: string) =>
       const update = await import('./update');
       const real = await update.electronUpdater();
       return typeof real.check === 'function';
+    },
+    async fakeUpdates(plan) {
+      (await import('./update')).useUpdater({
+        check: async () => {
+          if (plan.fail) throw new Error(plan.fail);
+          return plan.version ? { version: plan.version, releaseNotes: '* A new thing' } : null;
+        },
+        download: async () => {},
+        install: async () => {},
+      });
     },
     async startupCheck() {
       const update = await import('./update');

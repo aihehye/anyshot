@@ -69,6 +69,7 @@ export function trayTemplate(
     item('Pin from clipboard', 'pinClipboard'),
     { type: 'separator' },
     item('Settings…', 'settings'),
+    item('Check for updates…', 'checkForUpdates'),
     item('Quit anyshot', 'quit'),
   ];
 }

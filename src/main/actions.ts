@@ -41,6 +41,8 @@ export async function runAction(action: AppAction, file?: string): Promise<void>
       return (await import('./history-window')).openHistory();
     case 'settings':
       return (await import('./settings-window')).openSettings();
+    case 'checkForUpdates':
+      return (await import('./update')).checkFromTray();
     case 'openImage':
       await (await import('./editor')).openImage(file);
       return;

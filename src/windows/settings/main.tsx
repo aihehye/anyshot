@@ -5,7 +5,7 @@ import { useEffect, useId, useState } from 'preact/hooks';
 import logo from '../../../resources/icon-256.png';
 import { type AutoBeautify, SCREENSHOT_MODES } from '../../shared/background';
 import { expandTemplate } from '../../shared/filename';
-import type { HotkeyReport, InvokeRes } from '../../shared/ipc';
+import type { AppInfo, HotkeyReport, InvokeRes } from '../../shared/ipc';
 import { RECORDING_QUALITY_OPTIONS } from '../../shared/recording-quality';
 import {
   ACCELERATOR,
@@ -17,6 +17,7 @@ import {
   TOOL_IDS,
   toolsPageDefaults,
 } from '../../shared/settings';
+import { releaseUrl, type UpdateCheckResult } from '../../shared/update';
 import { BackgroundControls } from '../common/background-controls';
 import { Icon, type IconName } from '../common/icons';
 import { applyTheme } from '../common/theme';
@@ -635,7 +636,7 @@ function Page({
               onChange={(v) => patch({ general: { launchAtLogin: v } })}
             />
           </Row>
-          <Row label="Check for updates" hint="Looks for a new release at startup">
+          <Row label="Check for updates automatically" hint="Looks for a new release at startup">
             <Toggle
               value={s.general.checkForUpdates}
               testId="check-updates"
@@ -1017,27 +1018,130 @@ function Page({
     case 'uploads':
       return <Uploads s={s} />;
     case 'about':
-      return (
-        <div class="about">
-          <img class="logo" src={logo} alt="" width={72} height={72} />
-          <h2>anyshot</h2>
-          <p>A lean screenshot, annotation and screen-recording app for Windows and Linux.</p>
-          <p>
-            Released under the MIT licence. Feature ideas come from{' '}
+      return <About />;
+  }
+}
+
+type CheckState = { state: 'idle' } | { state: 'checking' } | UpdateCheckResult;
+
+function checkMessage(check: CheckState): string | null {
+  switch (check.state) {
+    case 'idle':
+      return null;
+    case 'checking':
+      return 'Checking for updates…';
+    case 'latest':
+      return 'You have the latest version.';
+    case 'available':
+      return `anyshot ${check.offer.version} is available.`;
+    case 'unavailable':
+      return check.message;
+    case 'error':
+      return `Could not check for updates. ${check.message}`;
+  }
+}
+
+function About() {
+  const [info, setInfo] = useState<AppInfo | null>(null);
+  const [check, setCheck] = useState<CheckState>({ state: 'idle' });
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    void api.invoke('app:info').then(setInfo);
+  }, []);
+  const details: [string, string][] = info
+    ? [
+        ['Version', info.version],
+        ['Install', info.install],
+        ['Electron', info.electron],
+        ['Chromium', info.chromium],
+        ['Node.js', info.node],
+        ['V8', info.v8],
+        ['OS', info.os],
+      ]
+    : [];
+  const message = checkMessage(check);
+  return (
+    <div class="about">
+      <img class="logo" src={logo} alt="" width={72} height={72} />
+      <h2>anyshot</h2>
+      {info && (
+        <p class="about-version" data-testid="about-version">
+          Version {info.version}
+        </p>
+      )}
+      <p>A lean screenshot, annotation and screen-recording app for Windows and Linux.</p>
+      <div class="about-update">
+        <button
+          type="button"
+          class="reset"
+          data-testid="about-check-updates"
+          disabled={check.state === 'checking'}
+          onClick={async () => {
+            setCheck({ state: 'checking' });
+            try {
+              setCheck(await api.invoke('update:check'));
+            } catch (error) {
+              setCheck({ state: 'error', message: String(error) });
+            }
+          }}
+        >
+          Check for updates
+        </button>
+        <span class="note" role="status" data-testid="about-update-status">
+          {message}
+        </span>
+      </div>
+      {info && (
+        <>
+          <dl class="versions" data-testid="about-details">
+            {details.map(([name, value]) => (
+              <div key={name}>
+                <dt>{name}</dt>
+                <dd>{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <div class="about-actions">
             <button
               type="button"
-              class="link"
-              onClick={() =>
-                void api.invoke('shell:open-url', 'https://github.com/sw33tLie/macshot')
-              }
+              class="reset"
+              data-testid="about-copy"
+              onClick={async () => {
+                await api.invoke(
+                  'clipboard:text',
+                  details.map(([name, value]) => `${name}: ${value}`).join('\n'),
+                );
+                setCopied(true);
+                setTimeout(() => setCopied(false), 2000);
+              }}
             >
-              macshot
+              {copied ? 'Copied' : 'Copy details'}
             </button>
-            ; anyshot shares no code or artwork with it.
-          </p>
-        </div>
-      );
-  }
+            {info.packaged && (
+              <button
+                type="button"
+                class="link"
+                onClick={() => void api.invoke('shell:open-url', releaseUrl(info.version))}
+              >
+                Release notes
+              </button>
+            )}
+          </div>
+        </>
+      )}
+      <p>
+        Released under the MIT licence. Feature ideas come from{' '}
+        <button
+          type="button"
+          class="link"
+          onClick={() => void api.invoke('shell:open-url', 'https://github.com/sw33tLie/macshot')}
+        >
+          macshot
+        </button>
+        ; anyshot shares no code or artwork with it.
+      </p>
+    </div>
+  );
 }
 
 function App() {

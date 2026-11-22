@@ -1,7 +1,7 @@
 /**
  * Update logic that doesn't need Electron: what an update offer looks like,
  * whether this install can update itself, the short notes shown to the user,
- * and the startup check with its dependencies injected.
+ * and the update checks with their dependencies injected.
  */
 
 export const RELEASES_URL = 'https://github.com/mgamergo/anyshot/releases';
@@ -22,6 +22,14 @@ export type UpdateStatus =
   | { state: 'installing' }
   | { state: 'error'; message: string };
 
+/** What a check started by the user (tray, Settings ▸ About) found. */
+export type UpdateCheckResult =
+  | { state: 'available'; offer: UpdateOffer }
+  | { state: 'latest'; current: string }
+  /** This build can't update (development); nothing was checked. */
+  | { state: 'unavailable'; message: string }
+  | { state: 'error'; message: string };
+
 /**
  * Whether this install can download and apply an update by itself: the NSIS
  * installer on Windows and an AppImage (which sets APPIMAGE) on Linux can; a
@@ -30,6 +38,31 @@ export type UpdateStatus =
 export function canSelfUpdate(platform: string, env: Record<string, string | undefined>): boolean {
   if (platform === 'win32') return true;
   return platform === 'linux' && !!env.APPIMAGE;
+}
+
+/** How anyshot was installed, as shown in Settings ▸ About. */
+export function installKind(
+  platform: string,
+  env: Record<string, string | undefined>,
+  packaged: boolean,
+): string {
+  if (!packaged) return 'Development build';
+  if (platform === 'win32') return 'Windows installer';
+  if (platform === 'linux') return env.APPIMAGE ? 'AppImage' : 'Debian package';
+  return 'Packaged';
+}
+
+/**
+ * A readable OS name. Windows 11 still reports itself as 10.0, so builds from
+ * 22000 on are named 11.
+ */
+export function osName(platform: string, release: string, arch: string): string {
+  if (platform === 'win32') {
+    const build = Number(release.split('.')[2]);
+    return `Windows ${build >= 22000 ? 11 : 10} (${release}, ${arch})`;
+  }
+  const name = platform === 'linux' ? 'Linux' : platform;
+  return `${name} ${release} (${arch})`;
 }
 
 export function releaseUrl(version: string): string {
@@ -77,36 +110,48 @@ export function shortNotes(notes: string | null | undefined, max = 5): string[] 
   return shown;
 }
 
-/** What the startup check needs; injected so it can be tested without Electron or a network. */
-export interface UpdateCheckDeps {
-  /** The app is packaged (not `electron .` in development or tests) and the user allows checks. */
-  enabled: boolean;
+/** What a check needs; injected so it can be tested without Electron or a network. */
+export interface UpdateLookup {
   current: string;
   canInstall: boolean;
   /** The newer release, or null when this is the latest. Rejects when offline. */
   check(): Promise<{ version: string; releaseNotes: string | null } | null>;
-  offer(offer: UpdateOffer): void;
-  log(message: string): void;
 }
 
-/** Checks for a newer release once and offers it; never throws (offline, rate limits, no release). */
-export async function checkForUpdate(deps: UpdateCheckDeps): Promise<UpdateOffer | null> {
-  if (!deps.enabled) return null;
-  let found: Awaited<ReturnType<UpdateCheckDeps['check']>>;
+/** Asks for a newer release once; never throws (offline, rate limits, no release). */
+export async function lookForUpdate(deps: UpdateLookup): Promise<UpdateCheckResult> {
+  let found: Awaited<ReturnType<UpdateLookup['check']>>;
   try {
     found = await deps.check();
   } catch (error) {
-    deps.log(`update check failed: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+    return { state: 'error', message: error instanceof Error ? error.message : String(error) };
   }
-  if (!found || found.version === deps.current) return null;
-  const offer: UpdateOffer = {
-    version: found.version,
-    current: deps.current,
-    notes: shortNotes(found.releaseNotes),
-    releaseUrl: releaseUrl(found.version),
-    canInstall: deps.canInstall,
+  if (!found || found.version === deps.current) return { state: 'latest', current: deps.current };
+  return {
+    state: 'available',
+    offer: {
+      version: found.version,
+      current: deps.current,
+      notes: shortNotes(found.releaseNotes),
+      releaseUrl: releaseUrl(found.version),
+      canInstall: deps.canInstall,
+    },
   };
-  deps.offer(offer);
-  return offer;
+}
+
+/** What a notification says about a check; null when the update window shows the result. */
+export function checkNotice(result: UpdateCheckResult): { title: string; body: string } | null {
+  switch (result.state) {
+    case 'available':
+      return null;
+    case 'latest':
+      return {
+        title: 'anyshot is up to date',
+        body: `You have the latest version, ${result.current}.`,
+      };
+    case 'unavailable':
+      return { title: 'Updates unavailable', body: result.message };
+    case 'error':
+      return { title: 'Could not check for updates', body: result.message };
+  }
 }
