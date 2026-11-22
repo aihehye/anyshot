@@ -320,5 +320,27 @@ describe('history', () => {
       expect(existsSync(history.thumbPath('plain'))).toBe(false);
       expect(existsSync(history.projectPath('plain'))).toBe(false);
     });
+
+    it('keeps failed queueEntry media recoverable in memory after all writes settle', async () => {
+      state.failWrite = (path) => path.endsWith('.anyshot');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const entry = history.queueEntry({
+          png,
+          thumb: new Uint8Array([1, 2]).buffer,
+          width: 4,
+          height: 3,
+          edit: edit(),
+        });
+        await history.flushHistory();
+        expect(existsSync(history.imagePath(entry.id))).toBe(false);
+        expect(existsSync(history.thumbPath(entry.id))).toBe(false);
+        expect(existsSync(history.projectPath(entry.id))).toBe(false);
+        expect((await history.listEntries()).map((e) => e.id)).toContain(entry.id);
+        expect([...(await history.readImage(entry.id))]).toEqual([...png]);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
   });
 });

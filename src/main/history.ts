@@ -309,6 +309,7 @@ export function queueEntry(input: QueueEntryInput, perf?: PerfMetrics): HistoryE
   const writePromise = serial(async () => {
     // Yield one turn so deliver() and IPC reply complete before thumbnail encoding or disk I/O.
     await new Promise<void>((resolve) => setImmediate(resolve));
+    let persisted = false;
     try {
       await ensureHistoryDir();
       const list = await load();
@@ -316,19 +317,28 @@ export function queueEntry(input: QueueEntryInput, perf?: PerfMetrics): HistoryE
       const thumbArr = rawThumb ? new Uint8Array(rawThumb) : undefined;
       const media = pendingMedia.get(entry.id);
       if (media && thumbArr) media.thumb = thumbArr;
-      await Promise.all([
+      // Settle every write before cleanup so an in-flight writeEditable rename cannot outlive removeFiles.
+      const results = await Promise.allSettled([
         writeFile(imagePath(entry.id), input.png),
         ...(thumbArr ? [writeFile(thumbPath(entry.id), thumbArr)] : []),
         ...(input.edit ? [writeEditable(entry.id, input.edit)] : []),
       ]);
+      const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+      if (failed) throw failed.reason;
       await persist([entry, ...list]);
+      persisted = true;
     } catch (error) {
       await removeFiles([entry]).catch(() => undefined);
-      console.error('[history] background write failed', error);
+      console.error(
+        '[history] background write failed; keeping entry in memory for this session',
+        error,
+      );
     } finally {
-      pendingEntries.delete(entry.id);
-      pendingMedia.delete(entry.id);
       pendingWrites.delete(entry.id);
+      if (persisted) {
+        pendingEntries.delete(entry.id);
+        pendingMedia.delete(entry.id);
+      }
     }
   });
   pendingWrites.set(entry.id, writePromise);

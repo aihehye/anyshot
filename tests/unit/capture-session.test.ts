@@ -43,7 +43,7 @@ vi.mock('../../src/main/settings-store', () => ({
 vi.mock('../../src/main/test-hooks', () => ({ recordTiming: () => {} }));
 
 class Overlay extends EventEmitter {
-  webContents = { id: state.nextId++, on: vi.fn() };
+  webContents = Object.assign(new EventEmitter(), { id: state.nextId++ });
   isDestroyed = () => this.closed;
   setAlwaysOnTop = vi.fn();
   setVisibleOnAllWorkspaces = vi.fn();
@@ -182,5 +182,49 @@ describe('capture sessions', () => {
     expect(prewarmed.isDestroyed()).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(prewarmed.isDestroyed()).toBe(true);
+  });
+
+  it('ends the session when a standby capture fails to grab', async () => {
+    state.instantCapture = true;
+    await startCapture('area');
+    const win = createWindow.mock.results[0]?.value as Overlay;
+    handlers.get('overlay:painted')?.(undefined, { win });
+    endCapture();
+
+    grabDisplay.mockRejectedValueOnce(new Error('grab failed'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await startCapture('area');
+      await Promise.resolve();
+      expect(isCapturing()).toBe(false);
+      expect(send).not.toHaveBeenCalledWith(win, 'overlay:reset', expect.anything());
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('destroys an active overlay and ends the session on render-process-gone', async () => {
+    state.instantCapture = true;
+    await startCapture('area');
+    const win = createWindow.mock.results[0]?.value as Overlay;
+    expect(isCapturing()).toBe(true);
+
+    win.webContents.emit('render-process-gone');
+    expect(win.isDestroyed()).toBe(true);
+    expect(isCapturing()).toBe(false);
+  });
+
+  it('recycles overlays even when overlay:painted arrives after overlay:hide', async () => {
+    state.instantCapture = true;
+    await startCapture('screen');
+    const win = createWindow.mock.results[0]?.value as Overlay;
+
+    handlers.get('overlay:hide')?.(undefined, { win });
+    handlers.get('overlay:painted')?.(undefined, { win });
+    expect(win.show).not.toHaveBeenCalled();
+
+    endCapture();
+    expect(win.isDestroyed()).toBe(false);
+    expect(send).toHaveBeenCalledWith(win, 'overlay:standby', undefined);
   });
 });

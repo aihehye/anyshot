@@ -63,23 +63,23 @@ export async function exportImage(options: ExportOptions): Promise<ExportDone> {
   };
   return new Promise((resolve, reject) => {
     const roundtripT0 = performance.now();
-    const w = getWorker();
-    const spawnMs = pendingWorkerSpawnMs;
-    pendingWorkerSpawnMs = 0;
-    pending.set(id, {
-      resolve: (done) => {
-        const perf: PerfMetrics = {
-          ...(done.perf ?? {}),
-          ...(spawnMs > 0 ? { worker_spawn: spawnMs } : {}),
-          export_crop_bitmap: cropMs,
-          worker_roundtrip: roundMs(performance.now() - roundtripT0),
-          export_total: roundMs(performance.now() - exportT0),
-        };
-        resolve({ ...done, perf });
-      },
-      reject,
-    });
     try {
+      const w = getWorker();
+      const spawnMs = pendingWorkerSpawnMs;
+      pendingWorkerSpawnMs = 0;
+      pending.set(id, {
+        resolve: (done) => {
+          const perf: PerfMetrics = {
+            ...(done.perf ?? {}),
+            ...(spawnMs > 0 ? { worker_spawn: spawnMs } : {}),
+            export_crop_bitmap: cropMs,
+            worker_roundtrip: roundMs(performance.now() - roundtripT0),
+            export_total: roundMs(performance.now() - exportT0),
+          };
+          resolve({ ...done, perf });
+        },
+        reject,
+      });
       w.postMessage(job, [bitmap]);
     } catch (error) {
       pending.delete(id);

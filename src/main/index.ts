@@ -4,6 +4,7 @@ import type { Settings } from '../shared/settings';
 import { getLoadedCaptureSession, loadCaptureSession, runAction, setCaptureDelay } from './actions';
 import { onAppState } from './app-state';
 import { type AppAction, handleSecondInstance, parseCli } from './cli';
+import { flushHistory } from './history';
 import { notifyHotkeyFailures, registerHotkeys, unregisterHotkeys } from './hotkeys';
 import { registerIpc } from './ipc-handlers';
 import { isTest } from './paths';
@@ -55,12 +56,20 @@ app.on('second-instance', (_event, argv, workingDirectory) => {
 // Stay in the tray when the last window closes.
 app.on('window-all-closed', () => {});
 
-app.on('before-quit', () => {
+let quittingAfterFlush = false;
+
+app.on('before-quit', (event) => {
   if (startupPrewarmTimer) {
     clearTimeout(startupPrewarmTimer);
     startupPrewarmTimer = null;
   }
   getLoadedCaptureSession()?.disposeOverlaysForQuit();
+  if (quittingAfterFlush) return;
+  event.preventDefault();
+  quittingAfterFlush = true;
+  void flushHistory()
+    .catch((error) => console.error('[history] flush on quit failed', error))
+    .finally(() => app.quit());
 });
 
 app.on('will-quit', () => unregisterHotkeys());

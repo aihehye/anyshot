@@ -169,7 +169,12 @@ export async function startCapture(
         (init) => {
           if (session === current && !win.isDestroyed()) send(win, 'overlay:reset', init);
         },
-        () => undefined,
+        (error) => {
+          if (session === current) {
+            console.error('[capture] standby capture failed', error);
+            endCapture();
+          }
+        },
       );
     } else {
       // The renderer may close before it asks for the grab result.
@@ -271,10 +276,10 @@ function attachOverlayLifecycle(win: BrowserWindow): void {
       if (entry.win === win) {
         warmPool.delete(displayId);
         if (warmPool.size === 0) clearWarmIdleTimer();
-        if (!win.isDestroyed()) win.destroy();
         break;
       }
     }
+    if (!win.isDestroyed()) win.destroy();
   });
 }
 
@@ -498,8 +503,9 @@ handle('overlay:init', (_req, { win }) => {
 
 handle('overlay:painted', (paintedPerf, { win }) => {
   const state = session?.overlays.get(win.webContents.id);
-  if (!session || session.finishing || !state) return;
+  if (!session || !state) return;
   state.reusable = true;
+  if (session.finishing) return;
   const ipcLatency = paintedPerf
     ? Math.max(0, roundMs(epochMs() - paintedPerf.sentEpochMs))
     : undefined;

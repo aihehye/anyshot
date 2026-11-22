@@ -96,10 +96,20 @@ export async function grabDisplays(displays: Display[], perfs?: PerfMetrics[]): 
   if (perfs) {
     for (const p of perfs) p.native_load = nativeLoadMs;
   }
+  let monitors:
+    | {
+        id: number;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        m: ReturnType<NodeScreenshots['Monitor']['all']>[number];
+      }[]
+    | null = null;
   if (ns) {
     try {
       const monT0 = performance.now();
-      const monitors = ns.Monitor.all().map((m) => ({
+      monitors = ns.Monitor.all().map((m) => ({
         id: m.id(),
         x: m.x(),
         y: m.y(),
@@ -111,43 +121,47 @@ export async function grabDisplays(displays: Display[], perfs?: PerfMetrics[]): 
       if (perfs) {
         for (const p of perfs) p.Monitor_all = monAllMs;
       }
-      return await Promise.all(
-        displays.map(async (display, idx) => {
-          const perf = perfs?.[idx];
-          const monitor = matchMonitor(monitors, display);
-          if (monitor) {
-            try {
-              const capT0 = performance.now();
-              const image = await monitor.m.captureImage();
-              if (perf) perf.captureImage = roundMs(performance.now() - capT0);
-              const rawT0 = performance.now();
-              const rgba = await image.toRaw();
-              if (perf) {
-                perf.toRaw = roundMs(performance.now() - rawT0);
-                perf.grab_total = roundMs(performance.now() - grabT0);
-              }
-              return { rgba, width: image.width, height: image.height };
-            } catch (error) {
-              console.warn('[capture] native grab failed for display, falling back', error);
-            }
-          }
-          const frame = await grabWithDesktopCapturer(display, perf);
-          if (perf) perf.grab_total = roundMs(performance.now() - grabT0);
-          return frame;
-        }),
-      );
     } catch (error) {
       console.warn('[capture] native Monitor.all failed, falling back', error);
     }
   }
-  return Promise.all(
-    displays.map(async (display, idx) => {
-      const perf = perfs?.[idx];
-      const frame = await grabWithDesktopCapturer(display, perf);
-      if (perf) perf.grab_total = roundMs(performance.now() - grabT0);
-      return frame;
-    }),
-  );
+  const frames: (Frame | undefined)[] = new Array(displays.length);
+  if (monitors) {
+    const resolvedMonitors = monitors;
+    await Promise.all(
+      displays.map(async (display, idx) => {
+        const perf = perfs?.[idx];
+        const monitor = matchMonitor(resolvedMonitors, display);
+        if (!monitor) return;
+        try {
+          const capT0 = performance.now();
+          const image = await monitor.m.captureImage();
+          if (perf) perf.captureImage = roundMs(performance.now() - capT0);
+          const rawT0 = performance.now();
+          const rgba = await image.toRaw();
+          if (perf) {
+            perf.toRaw = roundMs(performance.now() - rawT0);
+            perf.grab_total = roundMs(performance.now() - grabT0);
+          }
+          frames[idx] = { rgba, width: image.width, height: image.height };
+        } catch (error) {
+          console.warn('[capture] native grab failed for display, falling back', error);
+        }
+      }),
+    );
+  }
+  // Run desktopCapturer sequentially so Wayland/PipeWire does not coalesce
+  // concurrent getSources() calls for same-resolution monitors into one screen.
+  for (let idx = 0; idx < displays.length; idx++) {
+    if (frames[idx]) continue;
+    const display = displays[idx];
+    if (!display) continue;
+    const perf = perfs?.[idx];
+    const frame = await grabWithDesktopCapturer(display, perf);
+    if (perf) perf.grab_total = roundMs(performance.now() - grabT0);
+    frames[idx] = frame;
+  }
+  return frames as Frame[];
 }
 
 /**

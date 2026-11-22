@@ -23,7 +23,7 @@ import { EffectButtons, EffectPopovers } from '../common/effects-ui';
 import { exportImage } from '../common/export';
 import { createStore, useStore } from '../common/store';
 import { TextPopover } from '../common/text-style-ui';
-import { followTheme } from '../common/theme';
+import { applyTheme } from '../common/theme';
 import { Bar, Button, ColorPopover, OptionsRow, ToolStrip } from '../common/toolbar';
 
 const api = window.anyshot;
@@ -361,6 +361,7 @@ function wantsSaveFormat(action: DeliverAction): boolean {
 /** Produces the final image and hands it to main, which closes the overlays. */
 async function finish(action: DeliverAction): Promise<void> {
   if (!selection || ui.get().busy || !annotator || !bitmap) return;
+  const gen = sessionGen;
   const currentBitmap = bitmap;
   const perf = new PerfTimer();
   ui.set({ busy: true });
@@ -380,9 +381,12 @@ async function finish(action: DeliverAction): Promise<void> {
       return;
     }
     const blank = isBlankDoc(doc);
+    const saveFormat = wantsSaveFormat(action);
+    const format = init.settings.output.imageFormat;
     // Fire-and-forget hide so encoding or native delivery starts without waiting for an IPC roundtrip.
     void api.invoke('overlay:hide');
-    if (blank) {
+    // fast-encode.ts cannot encode WebP natively yet, so WebP saves stay on the worker export path.
+    if (blank && !(saveFormat && format === 'webp')) {
       perf.mark('finish_pre_ipc');
       await api.invoke('capture:deliver-raw', {
         action,
@@ -393,14 +397,13 @@ async function finish(action: DeliverAction): Promise<void> {
       });
       return;
     }
-    const format = init.settings.output.imageFormat;
     const exportStart = performance.now();
     const [out, original] = await Promise.all([
       exportImage({
         source: currentBitmap,
         region,
         doc,
-        ...(wantsSaveFormat(action)
+        ...(saveFormat
           ? {
               save: {
                 mime: format === 'jpeg' ? ('image/jpeg' as const) : ('image/webp' as const),
@@ -410,8 +413,9 @@ async function finish(action: DeliverAction): Promise<void> {
           : {}),
       }),
       // Annotated captures also keep their original pixels, so history reopens them editable.
-      exportImage({ source: currentBitmap, region, thumbMax: 16 }),
+      blank ? null : exportImage({ source: currentBitmap, region, thumbMax: 16 }),
     ]);
+    if (gen !== sessionGen) return;
     perf.mark('export_all_total', exportStart);
     perf.merge(out.perf);
     perf.mark('finish_pre_ipc');
@@ -421,12 +425,12 @@ async function finish(action: DeliverAction): Promise<void> {
       thumb: out.thumb,
       screenRect,
       ...(out.save ? { saveImage: out.save } : {}),
-      edit: { doc, source: original.png },
+      ...(original ? { edit: { doc, source: original.png } } : {}),
       perf: { metrics: perf.metrics, sentEpochMs: epochMs() },
     });
   } catch (error) {
     console.error('[overlay] finish failed', error);
-    await api.invoke('overlay:cancel');
+    if (gen === sessionGen) await api.invoke('overlay:cancel');
   }
 }
 
@@ -715,7 +719,7 @@ async function activate(nextInit: OverlayInit, perf = new PerfTimer()): Promise<
   const gen = sessionGen;
   init = nextInit;
   const activeStart = performance.now();
-  followTheme(init.settings);
+  applyTheme(init.settings);
   ui.set({
     audio: {
       microphone: init.settings.recording.microphone,
@@ -779,6 +783,7 @@ function setupOnce(): void {
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   window.addEventListener('contextmenu', (e) => e.preventDefault());
+  api.on('settings:changed', applyTheme);
   api.on('overlay:clear-selection', () => {
     if (ui.get().phase !== 'loading') setSelection(null);
   });
