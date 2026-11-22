@@ -42,7 +42,7 @@ const offer = (patch: Partial<UpdateOffer> = {}): UpdateOffer => ({
 async function showOffer(
   app: ElectronApplication,
   o: UpdateOffer,
-  plan: { fail?: string; installFail?: string; holdMs?: number } = {},
+  plan: { fail?: string; installFail?: string; hold?: boolean } = {},
 ) {
   await app.evaluate((_e, [o, plan]) => globalThis.__anyshot?.offerUpdate(o, plan), [
     o,
@@ -80,9 +80,8 @@ test('the update window shows the version and notes, and Update downloads and in
   await expect(page.getByTestId('update-later')).toBeDisabled();
   await expect(page.getByTestId('update-progress')).toContainText('restarts in a moment');
   // The one download finishes and installs once.
-  await expect
-    .poll(() => ctx.app.evaluate(() => globalThis.__anyshot?.updateInstalls), { timeout: 10_000 })
-    .toBe(1);
+  await release(ctx.app, 'download');
+  await expect.poll(() => installs(ctx.app)).toBe(1);
 });
 
 test('a failed download says why and can be tried again; Later closes the window', async () => {
@@ -128,8 +127,10 @@ test('update checks can be turned off in Settings', async () => {
     .toBe(false);
 });
 
-const fakeUpdates = (app: ElectronApplication, plan: { version?: string; fail?: string }) =>
-  app.evaluate((_e, plan) => globalThis.__anyshot?.fakeUpdates(plan), plan);
+const fakeUpdates = (
+  app: ElectronApplication,
+  plan: { version?: string; fail?: string; hold?: boolean },
+) => app.evaluate((_e, plan) => globalThis.__anyshot?.fakeUpdates(plan), plan);
 
 /** Records notifications instead of showing them. */
 async function recordNotices(app: ElectronApplication) {
@@ -143,6 +144,11 @@ async function recordNotices(app: ElectronApplication) {
 }
 const notices = (app: ElectronApplication) =>
   app.evaluate(() => (globalThis as { __notices?: unknown[] }).__notices ?? []);
+
+const release = (app: ElectronApplication, name: 'check' | 'download') =>
+  app.evaluate((_e, name) => globalThis.__anyshot?.release(name), name);
+const installs = (app: ElectronApplication) =>
+  app.evaluate(() => globalThis.__anyshot?.updateInstalls);
 
 const clickTray = (app: ElectronApplication, label: string) =>
   app.evaluate(({ Menu }, label) => {
@@ -218,7 +224,7 @@ test('Settings ▸ About shows version details and checks for updates', async ()
 });
 
 test('checking again after closing the window during a download shows that download', async () => {
-  const page = await showOffer(ctx.app, offer(), { holdMs: 3000 });
+  const page = await showOffer(ctx.app, offer(), { hold: true });
   await page.getByTestId('update-install').click();
   await expect(page.getByTestId('update-progress')).toContainText('Downloading… 30 %');
   // The title bar's close button, not Later.
@@ -238,8 +244,24 @@ test('checking again after closing the window during a download shows that downl
   await expect(again.getByTestId('update-progress')).toContainText('Downloading… 30 %');
   await expect(again.getByTestId('update-install')).toBeDisabled();
   // The one download finishes and installs once.
-  await expect
-    .poll(() => ctx.app.evaluate(() => globalThis.__anyshot?.updateInstalls), { timeout: 10_000 })
-    .toBe(1);
+  await release(ctx.app, 'download');
+  await expect.poll(() => installs(ctx.app)).toBe(1);
   expect(await notices(ctx.app)).toEqual([]);
+});
+
+test('Update clicked during a check waits for it, and a different release found asks again', async () => {
+  const page = await showOffer(ctx.app, offer());
+  await fakeUpdates(ctx.app, { version: '0.4.0', hold: true });
+  await clickTray(ctx.app, 'Check for updates…');
+  await page.getByTestId('update-install').click();
+  // Nothing downloads while the check runs.
+  await expect(page.getByTestId('update-progress')).toHaveCount(0);
+
+  await release(ctx.app, 'check');
+  await expect(page.getByTestId('update-title')).toHaveText('anyshot 0.4.0 is available');
+  await expect(page.getByTestId('update-install')).toBeEnabled();
+  expect(await installs(ctx.app)).toBe(0);
+
+  await page.getByTestId('update-install').click();
+  await expect.poll(() => installs(ctx.app)).toBe(1);
 });

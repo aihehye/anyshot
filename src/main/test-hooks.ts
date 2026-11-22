@@ -15,20 +15,28 @@ export interface TestHooks {
   timings: Record<string, number[]>;
   /**
    * Shows the update window with a fake updater: its download reports 30 %,
-   * waits (`holdMs`, default 300), then fails or "installs".
+   * waits (300 ms, or with `hold` until `release('download')`), then fails or "installs".
    */
   offerUpdate(
     offer: UpdateOffer,
-    plan?: { fail?: string; installFail?: string; holdMs?: number },
+    plan?: { fail?: string; installFail?: string; hold?: boolean },
   ): Promise<void>;
   /** Runs the startup check against a fake updater and returns how often it was asked. */
   startupCheck(): Promise<number>;
-  /** Later checks ask a fake updater that finds `version` (none: up to date) or fails. */
-  fakeUpdates(plan: { version?: string; fail?: string }): Promise<void>;
+  /**
+   * Later checks ask a fake updater that finds `version` (none: up to date) or
+   * fails; with `hold`, each check waits for `release('check')`.
+   */
+  fakeUpdates(plan: { version?: string; fail?: string; hold?: boolean }): Promise<void>;
+  /** Lets a fake step waiting under this name go on. */
+  release(name: 'check' | 'download'): void;
   updateInstalls: number;
   /** Loads electron-updater as packaged builds do, without checking: whether it worked. */
   loadUpdater(): Promise<boolean>;
 }
+
+const gates = new Map<string, () => void>();
+const gate = (name: string) => new Promise<void>((resolve) => gates.set(name, resolve));
 
 declare global {
   var __anyshot: TestHooks | undefined;
@@ -54,7 +62,7 @@ export function installTestHooks(dispatch: (action: AppAction, file?: string) =>
         check: async () => null,
         async download(onProgress) {
           onProgress(30);
-          await new Promise((r) => setTimeout(r, plan.holdMs ?? 300));
+          await (plan.hold ? gate('download') : new Promise((r) => setTimeout(r, 300)));
           if (plan.fail) throw new Error(plan.fail);
           onProgress(100);
         },
@@ -71,14 +79,22 @@ export function installTestHooks(dispatch: (action: AppAction, file?: string) =>
       const real = await update.electronUpdater();
       return typeof real.check === 'function';
     },
+    release(name) {
+      gates.get(name)?.();
+      gates.delete(name);
+    },
     async fakeUpdates(plan) {
       (await import('./update')).useUpdater({
         check: async () => {
+          if (plan.hold) await gate('check');
           if (plan.fail) throw new Error(plan.fail);
           return plan.version ? { version: plan.version, releaseNotes: '* A new thing' } : null;
         },
         download: async () => {},
-        install: async () => {},
+        install: async () => {
+          const hooks = globalThis.__anyshot;
+          if (hooks) hooks.updateInstalls++;
+        },
       });
     },
     async startupCheck() {

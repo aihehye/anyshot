@@ -72,6 +72,7 @@ let offer: UpdateOffer | null = null;
 let status: UpdateStatus = { state: 'idle' };
 let win: BrowserWindow | null = null;
 let checking: Promise<UpdateCheckResult> | null = null;
+let installRequested = false;
 
 /** The updater: a test's fake, or electron-updater in packaged builds; null in development. */
 async function loadUpdater(): Promise<Updater | null> {
@@ -186,11 +187,16 @@ handle('update:init', () => {
 });
 
 handle('update:install', async () => {
-  if (!offer?.canInstall || !updater) return;
-  if (status.state === 'downloading' || status.state === 'installing') return;
-  const current = updater;
-  setStatus({ state: 'downloading', percent: 0 });
+  if (installRequested || status.state === 'downloading' || status.state === 'installing') return;
+  installRequested = true;
   try {
+    const accepted = offer?.version;
+    // A running check can leave another release in the updater. Let it finish; if it
+    // found another version, the window now shows that one and waits for a new click.
+    await checking;
+    if (!offer?.canInstall || !updater || offer.version !== accepted) return;
+    const current = updater;
+    setStatus({ state: 'downloading', percent: 0 });
     await current.download((percent) =>
       setStatus({ state: 'downloading', percent: Math.max(0, Math.min(100, percent)) }),
     );
@@ -201,5 +207,7 @@ handle('update:install', async () => {
       state: 'error',
       message: error instanceof Error ? error.message : String(error),
     });
+  } finally {
+    installRequested = false;
   }
 });
