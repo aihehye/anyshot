@@ -33,6 +33,9 @@ const pendingMedia = new Map<
   { png: Uint8Array; thumb?: Uint8Array; edit?: EditableSource }
 >();
 const pendingWrites = new Map<string, Promise<void>>();
+/** Monotonic creation sequence for deterministic newest-first tie-breaking within a session. */
+let nextCreationSeq = 0;
+const creationSeq = new Map<string, number>();
 
 const indexFile = () => join(paths.historyDir, 'index.json');
 export const imagePath = (id: string) => join(paths.historyDir, `${id}.png`);
@@ -106,8 +109,16 @@ function deletePending(id: string): boolean {
   return hadEntry || hadMedia;
 }
 
+function recordCreation(id: string): void {
+  creationSeq.set(id, ++nextCreationSeq);
+}
+
+function compareNewestFirst(a: HistoryEntry, b: HistoryEntry): number {
+  return b.createdAt - a.createdAt || (creationSeq.get(b.id) ?? 0) - (creationSeq.get(a.id) ?? 0);
+}
+
 function pendingNewestFirst(): HistoryEntry[] {
-  return [...pendingEntries.values()].reverse().sort((a, b) => b.createdAt - a.createdAt);
+  return [...pendingEntries.values()].reverse().sort(compareNewestFirst);
 }
 
 /**
@@ -147,8 +158,11 @@ async function prune(): Promise<void> {
   if (pendingEntries.size > 0) {
     for (const [i, entry] of pendingNewestFirst().entries()) {
       if (pendingWrites.has(entry.id) || holds.has(entry.id)) continue;
-      const newerOnDisk = keep.filter((d) => d.createdAt > entry.createdAt).length;
+      const newerOnDisk = keep.filter(
+        (d) => d.id !== entry.id && compareNewestFirst(d, entry) < 0,
+      ).length;
       if (i + newerOnDisk >= limit && deletePending(entry.id)) {
+        creationSeq.delete(entry.id);
         droppedPending = true;
       }
     }
@@ -156,6 +170,7 @@ async function prune(): Promise<void> {
   if (drop.length > 0) {
     await persist(keep);
     await removeFiles(drop);
+    for (const entry of drop) creationSeq.delete(entry.id);
   } else if (droppedPending) {
     notifyHistoryChanged();
   }
@@ -329,9 +344,11 @@ export function addEntry(
         if (perf) perf.history_edit_write = roundMs(performance.now() - editT0);
       }
       const persistT0 = performance.now();
+      recordCreation(entry.id);
       await persist([entry, ...list]);
       if (perf) perf.history_index_persist = roundMs(performance.now() - persistT0);
     } catch (error) {
+      creationSeq.delete(entry.id);
       await removeFiles([entry]).catch(() => undefined);
       throw error;
     }
@@ -356,6 +373,7 @@ export function queueEntry(input: QueueEntryInput, perf?: PerfMetrics): HistoryE
     savedPath: input.savedPath ?? null,
   };
   retain(entry.id);
+  recordCreation(entry.id);
   pendingEntries.set(entry.id, entry);
   const eagerThumb =
     typeof input.thumb === 'function'
@@ -410,7 +428,9 @@ export async function listEntries(): Promise<HistoryEntry[]> {
   if (pendingEntries.size === 0) {
     return disk.filter((e, i) => i < limit || holds.has(e.id));
   }
-  const merged = [...pendingNewestFirst(), ...disk.filter((e) => !pendingEntries.has(e.id))];
+  const merged = [...pendingNewestFirst(), ...disk.filter((e) => !pendingEntries.has(e.id))].sort(
+    compareNewestFirst,
+  );
   return merged.filter((e, i) => i < limit || holds.has(e.id));
 }
 
@@ -456,7 +476,9 @@ export function removeEntry(id: string): Promise<void> {
     if (dropped.length > 0) {
       await persist(next);
       await removeFiles(dropped);
+      creationSeq.delete(id);
     } else if (hadPending) {
+      creationSeq.delete(id);
       notifyHistoryChanged();
     }
   });
@@ -470,11 +492,15 @@ export function clearHistory(): Promise<void> {
     const drop = list.filter((e) => !holds.has(e.id));
     let droppedPending = false;
     for (const id of new Set([...pendingEntries.keys(), ...pendingMedia.keys()])) {
-      if (!holds.has(id) && deletePending(id)) droppedPending = true;
+      if (!holds.has(id) && deletePending(id)) {
+        creationSeq.delete(id);
+        droppedPending = true;
+      }
     }
     if (drop.length > 0) {
       await persist(keep);
       await removeFiles(drop);
+      for (const entry of drop) creationSeq.delete(entry.id);
     } else if (droppedPending) {
       notifyHistoryChanged();
     }
@@ -569,7 +595,7 @@ export function replaceImage(
       try {
         await ensureHistoryDir();
         await writeEntryMedia(id, input.png, thumbArr, input.edit);
-        await persist([updated, ...list]);
+        await persist([updated, ...list].sort(compareNewestFirst));
         deletePending(id);
       } catch (error) {
         await removeFiles([updated]).catch(() => undefined);

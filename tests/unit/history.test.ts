@@ -484,5 +484,153 @@ describe('history', () => {
         errorSpy.mockRestore();
       }
     });
+
+    it('merges older retained failures and newer persisted captures newest-first and respects limit', async () => {
+      state.failWrite = (path) => path.endsWith('.anyshot');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const nowSpy = vi.spyOn(Date, 'now');
+      try {
+        nowSpy.mockReturnValue(1000);
+        const older = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'older', kind: 'line' }]),
+        });
+        await history.flushHistory();
+
+        state.failWrite = undefined;
+        nowSpy.mockReturnValue(2000);
+        const newer = await history.addEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'newer', kind: 'rect' }]),
+        });
+        history.release(newer.id);
+
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newer.id, older.id]);
+
+        state.historySize = 1;
+        // Held older entry remains listed after newer; once released, limit hides and prunes it.
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newer.id, older.id]);
+        history.release(older.id);
+        await settle();
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newer.id]);
+        expect(await history.getEntry(older.id)).toBeUndefined();
+
+        // Same-millisecond captures also preserve newest-first order.
+        state.historySize = 10;
+        state.failWrite = (path) => path.endsWith('.anyshot');
+        nowSpy.mockReturnValue(3000);
+        const sameMsOlder = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'same-older', kind: 'line' }]),
+        });
+        await history.flushHistory();
+
+        state.failWrite = undefined;
+        const sameMsNewer = await history.addEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'same-newer', kind: 'rect' }]),
+        });
+        history.release(sameMsNewer.id);
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([
+          sameMsNewer.id,
+          sameMsOlder.id,
+          newer.id,
+        ]);
+
+        state.historySize = 1;
+        history.release(sameMsOlder.id);
+        await settle();
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([sameMsNewer.id]);
+      } finally {
+        nowSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('preserves creation order when a retained failure recovers via replaceImage', async () => {
+      state.historySize = 1;
+      state.failWrite = (path) => path.endsWith('.anyshot');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const nowSpy = vi.spyOn(Date, 'now');
+      try {
+        nowSpy.mockReturnValue(1000);
+        const olderA = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'a', kind: 'line' }]),
+        });
+        await history.flushHistory();
+
+        state.failWrite = undefined;
+        nowSpy.mockReturnValue(2000);
+        const newerB = await history.addEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'b', kind: 'rect' }]),
+        });
+        history.release(newerB.id);
+        await settle();
+
+        // Storage recovers when olderA is saved via replaceImage; newerB must remain first.
+        nowSpy.mockReturnValue(3000);
+        await history.replaceImage(olderA.id, {
+          png: new Uint8Array([5, 6, 7]),
+          width: 8,
+          height: 6,
+          edit: edit([{ id: 'a-saved', kind: 'line' }]),
+        });
+        expect(await indexIds()).toEqual([newerB.id, olderA.id]);
+
+        // Releasing olderA triggers prune(): newerB is kept and olderA is pruned.
+        history.release(olderA.id);
+        await settle();
+        expect(await indexIds()).toEqual([newerB.id]);
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newerB.id]);
+        expect(existsSync(history.imagePath(newerB.id))).toBe(true);
+        expect(existsSync(history.projectPath(newerB.id))).toBe(true);
+        expect(existsSync(history.imagePath(olderA.id))).toBe(false);
+        expect(existsSync(history.projectPath(olderA.id))).toBe(false);
+
+        // Conversely, a recovered newest capture stays first and survives pruning.
+        state.failWrite = (path) => path.endsWith('.anyshot');
+        nowSpy.mockReturnValue(4000);
+        const newestC = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'c', kind: 'line' }]),
+        });
+        await history.flushHistory();
+
+        state.failWrite = undefined;
+        nowSpy.mockReturnValue(5000);
+        await history.replaceImage(newestC.id, {
+          png: new Uint8Array([8, 9]),
+          width: 8,
+          height: 6,
+          edit: edit([{ id: 'c-saved', kind: 'rect' }]),
+        });
+        expect(await indexIds()).toEqual([newestC.id, newerB.id]);
+
+        history.release(newestC.id);
+        await settle();
+        expect(await indexIds()).toEqual([newestC.id]);
+        expect(existsSync(history.imagePath(newestC.id))).toBe(true);
+        expect(existsSync(history.imagePath(newerB.id))).toBe(false);
+      } finally {
+        nowSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    });
   });
 });
