@@ -33,7 +33,7 @@ const pendingMedia = new Map<
   { png: Uint8Array; thumb?: Uint8Array; edit?: EditableSource }
 >();
 const pendingWrites = new Map<string, Promise<void>>();
-/** Monotonic creation sequence for deterministic newest-first tie-breaking within a session. */
+/** Monotonic creation sequence for deterministic newest-first ordering within a session. */
 let nextCreationSeq = 0;
 const creationSeq = new Map<string, number>();
 
@@ -114,7 +114,7 @@ function recordCreation(id: string): void {
 }
 
 function compareNewestFirst(a: HistoryEntry, b: HistoryEntry): number {
-  return b.createdAt - a.createdAt || (creationSeq.get(b.id) ?? 0) - (creationSeq.get(a.id) ?? 0);
+  return (creationSeq.get(b.id) ?? 0) - (creationSeq.get(a.id) ?? 0);
 }
 
 function pendingNewestFirst(): HistoryEntry[] {
@@ -316,20 +316,21 @@ export function addEntry(
   },
   perf?: PerfMetrics,
 ): Promise<HistoryEntry> {
+  const entry: HistoryEntry = {
+    id: randomUUID(),
+    createdAt: Date.now(),
+    width: input.width,
+    height: input.height,
+    kind: 'image',
+    savedPath: input.savedPath ?? null,
+  };
+  recordCreation(entry.id);
   return serial(async () => {
-    const loadT0 = performance.now();
-    const list = await load();
-    if (perf) perf.history_load = roundMs(performance.now() - loadT0);
-    await ensureHistoryDir();
-    const entry: HistoryEntry = {
-      id: randomUUID(),
-      createdAt: Date.now(),
-      width: input.width,
-      height: input.height,
-      kind: 'image',
-      savedPath: input.savedPath ?? null,
-    };
     try {
+      const loadT0 = performance.now();
+      const list = await load();
+      if (perf) perf.history_load = roundMs(performance.now() - loadT0);
+      await ensureHistoryDir();
       const pngT0 = performance.now();
       await writeFile(imagePath(entry.id), input.png);
       if (perf) perf.history_png_write = roundMs(performance.now() - pngT0);
@@ -344,7 +345,6 @@ export function addEntry(
         if (perf) perf.history_edit_write = roundMs(performance.now() - editT0);
       }
       const persistT0 = performance.now();
-      recordCreation(entry.id);
       await persist([entry, ...list]);
       if (perf) perf.history_index_persist = roundMs(performance.now() - persistT0);
     } catch (error) {
@@ -410,6 +410,7 @@ export function queueEntry(input: QueueEntryInput, perf?: PerfMetrics): HistoryE
     } finally {
       pendingWrites.delete(entry.id);
       if (persisted) deletePending(entry.id);
+      else if (!pendingEntries.has(entry.id)) creationSeq.delete(entry.id);
     }
   });
   pendingWrites.set(entry.id, writePromise);
@@ -476,9 +477,9 @@ export function removeEntry(id: string): Promise<void> {
     if (dropped.length > 0) {
       await persist(next);
       await removeFiles(dropped);
-      creationSeq.delete(id);
+      if (!pendingWrites.has(id)) creationSeq.delete(id);
     } else if (hadPending) {
-      creationSeq.delete(id);
+      if (!pendingWrites.has(id)) creationSeq.delete(id);
       notifyHistoryChanged();
     }
   });
@@ -493,14 +494,16 @@ export function clearHistory(): Promise<void> {
     let droppedPending = false;
     for (const id of new Set([...pendingEntries.keys(), ...pendingMedia.keys()])) {
       if (!holds.has(id) && deletePending(id)) {
-        creationSeq.delete(id);
+        if (!pendingWrites.has(id)) creationSeq.delete(id);
         droppedPending = true;
       }
     }
     if (drop.length > 0) {
       await persist(keep);
       await removeFiles(drop);
-      for (const entry of drop) creationSeq.delete(entry.id);
+      for (const entry of drop) {
+        if (!pendingWrites.has(entry.id)) creationSeq.delete(entry.id);
+      }
     } else if (droppedPending) {
       notifyHistoryChanged();
     }

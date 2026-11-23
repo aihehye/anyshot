@@ -632,5 +632,132 @@ describe('history', () => {
         errorSpy.mockRestore();
       }
     });
+
+    it('keeps newer capture over older capture when clock moves backward', async () => {
+      state.historySize = 1;
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const nowSpy = vi.spyOn(Date, 'now');
+      try {
+        nowSpy.mockReturnValue(2000);
+        const olderA = await history.addEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'a', kind: 'line' }]),
+        });
+        history.release(olderA.id);
+        await settle();
+
+        // Clock moves backward before capture B; B fails its initial write and recovers later.
+        state.failWrite = (path) => path.endsWith('.anyshot');
+        nowSpy.mockReturnValue(1000);
+        const newerB = history.queueEntry({
+          png,
+          width: 4,
+          height: 3,
+          edit: edit([{ id: 'b', kind: 'rect' }]),
+        });
+        await history.flushHistory();
+
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newerB.id]);
+
+        state.failWrite = undefined;
+        nowSpy.mockReturnValue(1500);
+        await history.replaceImage(newerB.id, {
+          png: new Uint8Array([5, 6, 7]),
+          width: 8,
+          height: 6,
+          edit: edit([{ id: 'b-saved', kind: 'rect' }]),
+        });
+        expect(await indexIds()).toEqual([newerB.id, olderA.id]);
+
+        history.release(newerB.id);
+        await settle();
+        expect(await indexIds()).toEqual([newerB.id]);
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([newerB.id]);
+        expect(existsSync(history.imagePath(newerB.id))).toBe(true);
+        expect(existsSync(history.projectPath(newerB.id))).toBe(true);
+        expect(existsSync(history.imagePath(olderA.id))).toBe(false);
+        expect(existsSync(history.projectPath(olderA.id))).toBe(false);
+      } finally {
+        nowSpy.mockRestore();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('orders addEntry before a queueEntry started while addEntry is awaiting', async () => {
+      await seed(['old']);
+      state.indexReads = [() => sleep(30), async () => {}];
+      const addedPromise = history.addEntry({
+        png,
+        width: 4,
+        height: 3,
+        edit: edit([{ id: 'added', kind: 'line' }]),
+      });
+      const queued = history.queueEntry({
+        png,
+        width: 4,
+        height: 3,
+        edit: edit([{ id: 'queued', kind: 'rect' }]),
+      });
+      const added = await addedPromise;
+      await history.flushHistory();
+
+      expect(await indexIds()).toEqual([queued.id, added.id, 'old']);
+      expect((await history.listEntries()).map((e) => e.id)).toEqual([queued.id, added.id, 'old']);
+    });
+
+    it('preserves creation rank when clearHistory drops pending state for an in-flight write', async () => {
+      state.historySize = 1;
+      await seed(['pre-session']);
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let heldOlder!: ReturnType<History['queueEntry']>;
+      let releasedNewer!: ReturnType<History['queueEntry']>;
+      try {
+        state.indexReads = [
+          async () => {
+            // Older entry fails write and stays held; newer entry is released while its write is still queued.
+            heldOlder = history.queueEntry({
+              png,
+              width: 4,
+              height: 3,
+              edit: edit([{ id: 'older', kind: 'line' }]),
+            });
+            state.failWrite = (path) => path.endsWith(`${heldOlder.id}.anyshot`);
+            releasedNewer = history.queueEntry({
+              png,
+              width: 4,
+              height: 3,
+              edit: edit([{ id: 'newer', kind: 'rect' }]),
+            });
+            history.release(releasedNewer.id);
+          },
+        ];
+
+        await history.clearHistory();
+        await history.flushHistory();
+
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([
+          releasedNewer.id,
+          heldOlder.id,
+        ]);
+
+        state.failWrite = undefined;
+        await history.replaceImage(heldOlder.id, {
+          png: new Uint8Array([5, 6, 7]),
+          width: 8,
+          height: 6,
+          edit: edit([{ id: 'older-saved', kind: 'line' }]),
+        });
+        expect(await indexIds()).toEqual([releasedNewer.id, heldOlder.id]);
+
+        history.release(heldOlder.id);
+        await settle();
+        expect(await indexIds()).toEqual([releasedNewer.id]);
+        expect((await history.listEntries()).map((e) => e.id)).toEqual([releasedNewer.id]);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
   });
 });
